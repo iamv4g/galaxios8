@@ -169,8 +169,17 @@ Observed on the test phone used for this fork (serial not recorded):
   the macOS job builds it too. Mac and Linux images differ (58 752 vs 58 816
   bytes, different gcc); effect on the phone untested.
 - CI `xnu` run 39650123874 on the fork finished successfully (5 min 22 s).
-- Not done: `mkiosroot.sh` on macOS, `mkpayload.py` with a real kernel (waiting
-  for CI run 39650123874 on the fork). See `docs/mac-build.md`.
+- **Full BOOT build on a Mac:** kernel from CI run 39650123874
+  (`kernel.development.a5xelte`, Mach-O arm64, 17 076 512 bytes, SHA-256
+  `b4c14a32...c5b1d`) + `make-boot.sh` with the `s8-install.md` boot args gives
+  a 17 029 136-byte BOOT image (loader + payload, stock DTBH kept) that
+  `dreamlte_bootimg_info.py` parses; it fits `sda7` (41 943 040 bytes). Built
+  without the iPhone X `d22ap.adt` (no `/product` node). **Not written to or
+  booted on the phone.**
+- The CI LSE report says 1 instruction, in `K256`. That is the SHA-256 round
+  constant table sitting in `__TEXT_EXEC`, disassembled as code, not an LSE
+  instruction (guess from the symbol and constants; not run on hardware).
+- Not done: `mkiosroot.sh` on macOS. See `docs/mac-build.md`.
 
 ## Open work
 
