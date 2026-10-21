@@ -52,7 +52,7 @@ Help is welcome: issues and pull requests.
 
 ## Installation
 
-Step-by-step guide: **[docs/s8-install.md](docs/s8-install.md)**. Building on a Mac: **[docs/mac-build.md](docs/mac-build.md)** (loader and BOOT image native; the iOS root image is not ported yet).
+Step-by-step guide: **[docs/s8-install.md](docs/s8-install.md)**. Building on a Mac: **[docs/mac-build.md](docs/mac-build.md)** (loader and BOOT image native; the iOS root image in a Lima Linux VM).
 
 In short:
 1. An unlocked SM-G950F with TWRP and a full partition backup.

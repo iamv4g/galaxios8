@@ -11,8 +11,8 @@ Tested on macOS 26 / Apple Silicon with Homebrew. Observations are separate from
 | XNU kernel | GitHub Actions (macOS runner), or Xcode locally | CI run started on the fork; Mac side below |
 | S8 loader (`shim/dreamlte`) | yes, `aarch64-elf` cross toolchain | **built on a Mac**, 58 752 bytes |
 | ADT, payload, BOOT packer (Python) | yes, pure Python | ADT and BOOT repack **tested**; `mkpayload.py` needs a real kernel (see below) |
-| iOS root image (HFS+ from the IPSW) | not ported yet | **not done**: `mkiosroot.sh` needs `apfs-fuse`, `mkfs.hfsplus` and a Linux `hfsplus` mount |
-| Flash and log helpers | `flash-chunks.sh`, `pull-sweetlog.sh` | written, syntax-checked only; **never run against a phone** |
+| iOS root image (HFS+ from the IPSW) | in a Lima Linux VM on the Mac | **built and written to the phone** (see below); not native macOS |
+| Flash and log helpers | `flash-chunks.sh`, `pull-sweetlog.sh` | **used on the phone**: USERDATA written 512/512 verified, logs pulled |
 
 ## 1. Tools
 
