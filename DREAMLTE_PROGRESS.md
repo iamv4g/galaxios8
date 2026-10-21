@@ -181,6 +181,37 @@ Observed on the test phone used for this fork (serial not recorded):
   instruction (guess from the symbol and constants; not run on hardware).
 - Not done: `mkiosroot.sh` on macOS. See `docs/mac-build.md`.
 
+## galaxios8 first boots on the SM-G950N (2026-10-22)
+
+- **Boot g1** (BOOT `sda7` = CI kernel run 39650123874 + Mac-built loader,
+  no `/product` node, USERDATA still the Android ext4). Screen photo: XNU
+  console looping `BSD root: ufsroot0` -> `hfs_ValidateHFSPlusVolumeHeader:
+  unknown Volume Signature : e0` -> `cannot mount root, errno = 19` ->
+  `mount(N) failed` (N reached 54), as expected without an iOS root. Kernel
+  log ring (end of USERDATA, read in TWRP with `pull-sweetlog.sh`): AppleCLCD
+  1440x2960 at `0xcc000000`; fuel gauge 83 % 4244 mV charging; keys GPA2 read;
+  `S8 TOUCH: S6SY761 id ac3761`, worker started (re-probed on every mount
+  retry, sometimes `enable sequence failed`; the photo also shows `no S6SY761
+  in application mode (status 0)`); UFS `USERDATA` on LUN 0, 56132 MiB, rw.
+  **So the G950N has the same touch IC, fuel gauge, UFS and panel as the
+  G950F.** The pmsg zone had been overwritten by TWRP by then.
+- **iOS root built on the Mac** inside a Lima Ubuntu 24.04 arm64 VM (no
+  host sudo needed): `linux-modules-extra` for `hfsplus`, `hfsprogs`,
+  `apfs-fuse` from source. IPSW iPhone10,3/10,6 16.7.16 (20H392), 6 171 035 648
+  bytes, SHA-1 matches Apple's. `mkiosroot.sh` + `finish-iosroot.sh` ran clean
+  (fsck OK; launchd, SpringBoard and the arm64 shared cache present; warning
+  `no mobileactivationd system container ... skipped data ark`). 16 GiB image,
+  12 GiB used, SHA-256 `db8b0bd7...8f1f`.
+- **USERDATA write.** First run of `flash-chunks.sh` wrote chunk 0 only and
+  still reported success (adb shell swallowed the loop's stdin); fixed in
+  `ef2a987`, reproduced and verified with an adb stub. Second run: 512/512
+  chunks written and verified. `sda24` now starts with `HX` (HFSX v5).
+- **BOOT** `s8-ios-boot.img` (now with the iPhone X `d22ap` `/product` node),
+  17 031 184 bytes, SHA-256 `bfffbcba...b43a`, written to `sda7` and read back.
+  Boot args as in `s8-install.md` (`cpus=4`, `sweetfb_native=1`).
+- **Boot g2** started 02:51 (+07). Result not observed yet: with iOS running
+  there is no adb, so the screen (or a later TWRP log pull) will tell.
+
 ## Open work
 
 1. Boot the latest kernel/loader: does the frame-done copy remove the tearing,

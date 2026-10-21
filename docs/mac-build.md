@@ -85,6 +85,44 @@ bash tools/dreamlte/flash-chunks.sh ios16-root.img ios16-root.json USERDATA
 
 `flash-chunks.sh` asks you to type the partition name, refuses anything but BOOT or USERDATA, requires TWRP and `dreamlte`, and verifies each 32 MiB chunk by SHA-256. Read the logs afterwards with `bash tools/dreamlte/pull-sweetlog.sh boot32` (read-only on the phone).
 
-## Not done yet: the iOS root image
+## iOS root image on a Mac (Lima VM)
 
-You download the iPhone X 16.7.16 (20H392) IPSW yourself. `tools/mkiosroot.sh` and `finish-iosroot.sh` still target Linux. A macOS version is plausible with native tools (`hdiutil attach` for the APFS images, `newfs_hfs -s -J` for a case-sensitive journaled HFS+ image, `ditto` or Homebrew `rsync` to copy) but is untested; open questions are ownership and hard links, extended attributes, and what macOS adds to the volume (Spotlight, `.fseventsd`). Until that exists, the root image still needs the Linux path in [s8-install.md](s8-install.md).
+macOS cannot run `mkiosroot.sh` (it needs `apfs-fuse`, `mkfs.hfsplus` and a Linux `hfsplus` mount, all as root). A small Linux VM does it without any `sudo` on the Mac. **Done this way on 2026-10-22; the image booted is described in `DREAMLTE_PROGRESS.md`.**
+
+```bash
+brew install lima
+limactl start --name=s8 --cpus=6 --memory=12 --disk=120 --vm-type=vz --tty=false template:ubuntu-24.04
+limactl shell s8 -- bash -lc '
+  sudo apt-get update
+  sudo apt-get install -y linux-modules-extra-$(uname -r) hfsprogs rsync git cmake g++ \
+       libfuse3-dev fuse3 libbz2-dev zlib1g-dev libattr1-dev unzip python3
+  sudo modprobe hfsplus
+  git clone --recursive https://github.com/sgan81/apfs-fuse.git ~/apfs-fuse
+  cd ~/apfs-fuse && mkdir -p build && cd build && cmake .. && make -j6
+  sudo install -m 0755 apfs-fuse /usr/local/bin/apfs-fuse'
+```
+
+The VM sees your Mac home read-only, so it reads the IPSW and the repo in place. Names of the OS / SystemOS / AppOS images come from `BuildManifest.plist` (for 20H392: `087-86698-044.dmg`, `087-86593-047.dmg`, `087-86715-047.dmg`).
+
+```bash
+R=$HOME/lab/ios-galaxy-s8          # this repo on the Mac
+limactl shell s8 -- bash -lc "
+  mkdir -p ~/s8 && cd ~/s8
+  unzip -o $R/research/ipsw/<IPSW> 087-86698-044.dmg 087-86593-047.dmg 087-86715-047.dmg
+  sudo bash $R/tools/mkiosroot.sh \$PWD/087-86698-044.dmg \$PWD/087-86593-047.dmg \$PWD/087-86715-047.dmg \$PWD/ios16-root.img 16G
+  sudo bash $R/tools/dreamlte/finish-iosroot.sh \$PWD/ios16-root.img
+  sudo chown \$(id -u) ios16-root.img
+  python3 $R/tools/dreamlte/chunk-manifest.py ios16-root.img ios16-root.json"
+mkdir -p research/s8root
+limactl cp s8:/home/$USER.guest/s8/ios16-root.img s8:/home/$USER.guest/s8/ios16-root.json research/s8root/
+```
+
+The iPhone X device tree for the ADT `/product` node is extracted on the Mac:
+
+```bash
+brew install blacktop/tap/ipsw
+unzip -j research/ipsw/<IPSW> Firmware/all_flash/DeviceTree.d22ap.im4p -d research/ipsw-x/
+ipsw img4 im4p extract research/ipsw-x/DeviceTree.d22ap.im4p -o research/ipsw-x/d22ap.adt
+```
+
+Then rebuild the BOOT image (step 4) so the ADT carries `/product`, and flash both (step 5). `flash-chunks.sh` needs the fix from commit `ef2a987`: the first version wrote only the first chunk.
