@@ -154,6 +154,19 @@ Observed on the test phone used for this fork (serial not recorded):
 - **Not yet known:** whether the G950N uses the same touch IC, PMIC, fuel gauge
   and panel as the G950F (same board name, unverified); bootloader lock state.
 
+## macOS native build (2026-10-22)
+
+- `shim/dreamlte/build.sh` now falls back to `aarch64-elf-*` (Homebrew) and no
+  longer needs GNU `stat`, `sha256sum` or gawk `strtonum`; `make-boot.sh` no
+  longer needs GNU `realpath -m`. **Built on a Mac:** loader `out/Image`
+  58 752 bytes, no absolute relocations. Not compared with a Linux build.
+- Stock `backup/BOOT.img` repacked with a dummy payload parses with
+  `dreamlte_bootimg_info.py` (a flow check, not a bootable image).
+- `flash-chunks.sh` and `pull-sweetlog.sh` ported from PowerShell: syntax
+  checked only, never run against the phone.
+- Not done: `mkiosroot.sh` on macOS, `mkpayload.py` with a real kernel (waiting
+  for CI run 39650123874 on the fork). See `docs/mac-build.md`.
+
 ## Open work
 
 1. Boot the latest kernel/loader: does the frame-done copy remove the tearing,

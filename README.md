@@ -52,7 +52,7 @@ Help is welcome: issues and pull requests.
 
 ## Installation
 
-Step-by-step guide: **[docs/s8-install.md](docs/s8-install.md)**.
+Step-by-step guide: **[docs/s8-install.md](docs/s8-install.md)**. Building on a Mac: **[docs/mac-build.md](docs/mac-build.md)** (loader and BOOT image native; the iOS root image is not ported yet).
 
 In short:
 1. An unlocked SM-G950F with TWRP and a full partition backup.
@@ -82,8 +82,8 @@ S-Boot (stock Samsung bootloader, EL1, MMU off)
 | `tools/mkadt_dreamlte.py` | Apple Device Tree for the S8 |
 | `tools/dreamlte/make-boot.sh` | Kernel → BOOT image |
 | `tools/mkiosroot.sh`, `tools/dreamlte/finish-iosroot.sh` | iOS root image build |
-| `tools/dreamlte/flash-chunks.ps1` | Writes an image to USERDATA in verified chunks |
-| `tools/dreamlte/pull-sweetlog.ps1` | Pulls the boot logs from TWRP |
+| `tools/dreamlte/flash-chunks.ps1`, `flash-chunks.sh` | Writes an image to BOOT / USERDATA in verified chunks (PowerShell, bash for macOS/Linux) |
+| `tools/dreamlte/pull-sweetlog.ps1`, `pull-sweetlog.sh` | Pulls the boot logs from TWRP |
 | `DREAMLTE_PROGRESS.md` | **S8 port log**: hardware facts, every boot, open work (the handoff file) |
 | `docs/history/` | Galaxy A5 2016 (`A5XELTE_PROGRESS.md`, `a5xelte-*.md`) and original SWEET / Redmi Note 10 Pro (`NOTES.md`, `upstream-README.md`) history, kept as reference |
 

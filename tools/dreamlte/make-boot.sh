@@ -5,7 +5,9 @@
 # yet, so the first trials end in a root-mount panic by design.
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/../.." && pwd)
-kernel=$(realpath "$1"); stock=$(realpath "$2"); out=$(realpath -m "$3")
+# macOS realpath has no -m (and the output file does not exist yet): resolve in Python.
+abspath() { python3 -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "$1"; }
+kernel=$(abspath "$1"); stock=$(abspath "$2"); out=$(abspath "$3")
 shift 3
 # a5touchprobe=0: the A5 touch probe maps Exynos7580 I2C/GPIO; on the S8 its
 # first read is a synchronous external abort (boot 8, a5xelte_touch_probe).
