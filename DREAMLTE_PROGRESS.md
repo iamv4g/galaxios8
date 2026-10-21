@@ -164,6 +164,11 @@ Observed on the test phone used for this fork (serial not recorded):
   `dreamlte_bootimg_info.py` (a flow check, not a bootable image).
 - `flash-chunks.sh` and `pull-sweetlog.sh` ported from PowerShell: syntax
   checked only, never run against the phone.
+- CI `loader` workflow (run 39650850106): Ubuntu builds the loader with the
+  old and the new `build.sh` and the images are byte-identical (58 816 bytes);
+  the macOS job builds it too. Mac and Linux images differ (58 752 vs 58 816
+  bytes, different gcc); effect on the phone untested.
+- CI `xnu` run 39650123874 on the fork finished successfully (5 min 22 s).
 - Not done: `mkiosroot.sh` on macOS, `mkpayload.py` with a real kernel (waiting
   for CI run 39650123874 on the fork). See `docs/mac-build.md`.
 

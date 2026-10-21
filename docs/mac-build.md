@@ -63,7 +63,7 @@ Checked on the Mac without a kernel: `build.sh` alone builds `shim/dreamlte/out/
 Notes:
 
 - `tools/mkadt_dreamlte.py` warns `d22ap.adt missing, no /product node` until you extract the iPhone X device tree (needs the IPSW and `ipsw`, see below). The BOOT image still builds, but boot with the product node for the real iOS run.
-- The result is deterministic only for a given compiler; the Mac `aarch64-elf-gcc` output has not been compared byte for byte with a Linux build.
+- The loader is deterministic only for a given compiler. CI (`loader` workflow, run 39650850106): on Ubuntu the pre-macOS `build.sh` and the current one give a byte-identical image (58 816 bytes). The Mac `aarch64-elf-gcc` 16.2 image is 58 752 bytes, so Mac and Linux loaders are **not** byte-identical; whether the 64-byte difference matters on the phone is untested.
 
 ## 5. Writing to the phone (needs the S8, destructive)
 
