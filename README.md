@@ -1,14 +1,26 @@
 # galaxios8: iOS on the Samsung Galaxy S8
 
-**iOS 16.7 on the Samsung Galaxy S8 (SM-G950F, Exynos 8895, `dreamlte`).**
+**iOS 16.7 on the Samsung Galaxy S8, Exynos 8895 (`dreamlte`): SM-G950F and SM-G950N.**
 
 This project ports Apple's open-source XNU kernel (xnu-8796, the iOS 16 generation) to the Galaxy S8. On top of it runs the **unmodified iOS 16.7.16 (20H392) userland of the iPhone X**: launchd, the system daemons, backboardd and SpringBoard. The phone reaches the **iOS lock screen**.
 
-> **2026-10-22:** iOS 16.7.16 also boots on the Korean **SM-G950N** (same touch IC, fuel gauge, UFS and panel as the G950F), built entirely on a Mac (see [docs/mac-build.md](docs/mac-build.md)).
+> **2026-10-22:** iOS 16.7.16 also boots on the Korean **SM-G950N** (same touch IC, fuel gauge, UFS, panel and partition numbers as the G950F), built entirely on a Mac (see [docs/mac-build.md](docs/mac-build.md)).
 
 > Fork of [Floppikrob/ios-galaxy-s8](https://github.com/Floppikrob/ios-galaxy-s8) (kept as the `upstream` remote). Port history up to boot 31 is from that project; see [Authors](#authors).
 
-> ⚠️ Experimental bring-up, not a usable phone OS. It is very slow and much is missing (see [Known bugs](#known-bugs)). Installing it **erases the USERDATA partition** (all Android data). Exynos **SM-G950F** only.
+> ⚠️ Experimental bring-up, not a usable phone OS. It is very slow and much is missing (see [Known bugs](#known-bugs)). Installing it **erases the USERDATA partition** (all Android data). Exynos S8 only: see [Supported models](#supported-models).
+
+## Supported models
+
+| Model | SoC | State |
+| --- | --- | --- |
+| **SM-G950F** (international) | Exynos 8895 | Upstream port: lock screen, home screen, touch, keys, battery |
+| **SM-G950N** (Korea) | Exynos 8895 | Boots iOS 16.7.16 to Settings with touch (this fork, bootloader `G950NKSU3CRJ1`) |
+| Other Exynos S8 variants (e.g. G950FD) | Exynos 8895 | Untested; probably the same board (`dreamlte`) |
+| SM-G950U/U1/W/0/SC | Snapdragon 835 | **Not supported** (different SoC) |
+| Galaxy S8+ (SM-G955x) | | **Not supported** (different panel; partitions not checked) |
+
+The phone's Android props can lie (for example a ROM ported from another model). Check the real hardware in TWRP or Android: `/proc/device-tree/model` must say `DREAMLTE` / `EXYNOS8895`, and `ro.boot.em.model` or the bootloader version (`G950F…`, `G950N…`) gives the model.
 
 ## What works
 
@@ -57,7 +69,7 @@ Help is welcome: issues and pull requests.
 Step-by-step guide: **[docs/s8-install.md](docs/s8-install.md)**. Building on a Mac: **[docs/mac-build.md](docs/mac-build.md)** (loader and BOOT image native; the iOS root image in a Lima Linux VM).
 
 In short:
-1. An unlocked SM-G950F with TWRP and a full partition backup.
+1. An unlocked Exynos S8 (SM-G950F or SM-G950N) with TWRP and a full partition backup.
 2. Fork this repository; the XNU kernel is built on GitHub Actions (workflow `xnu`, `MACHINE_CONFIG=A5XELTE`).
 3. The iOS root image is built from the iPhone X 16.7.16 IPSW, which you download yourself, and is written to USERDATA.
 4. `tools/dreamlte/make-boot.sh` builds the BOOT image (loader + XNU + Apple Device Tree), which is written to `sda7` from TWRP.

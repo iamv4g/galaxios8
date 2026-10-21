@@ -1,12 +1,13 @@
-# Installing iOS on the Galaxy S8 (SM-G950F)
+# Installing iOS on the Galaxy S8 (SM-G950F / SM-G950N)
 
 > ⚠️ **Risks.** This is an experimental build. Installing it **erases USERDATA** (all Android data). It needs an unlocked bootloader (Knox trips). Only two partitions are written: **BOOT (`sda7`)** and **USERDATA (`sda24`)**. EFS, recovery and the bootloaders are not touched, but **make a full backup** before you start.
 >
-> **SM-G950F** only (Exynos 8895, `dreamlte`). The Snapdragon models (G950U/W/0) and the S8+ (G955F) are not supported: the S8+ has a different panel and partition numbers may differ.
+> Exynos 8895 (`dreamlte`) only: **SM-G950F** (upstream) and **SM-G950N** (tested in the galaxios8 fork; same BOOT `sda7` and USERDATA `sda24`). Other Exynos variants are untested. The Snapdragon models (G950U/U1/W/0/SC) and the S8+ (G955x) are not supported: the S8+ has a different panel and partition numbers may differ. Android props can lie on ported ROMs; check `/proc/device-tree/model` (`DREAMLTE`) and the bootloader version.
 
 ## 0. Requirements
 
-- Galaxy S8 SM-G950F, OEM unlock, **TWRP** installed.
+- Galaxy S8 SM-G950F or SM-G950N, OEM unlock, **TWRP** installed (TWRP has no `/dev/block/by-name`: use the `sdaN` names).
+- macOS instead of Linux: see [mac-build.md](mac-build.md).
 - PC: Linux, or Windows 10/11 with **WSL Ubuntu**. Shell commands below are for Linux/WSL; the `.ps1` scripts are for PowerShell on Windows.
 - `adb` (platform-tools), `python3`, `gh` (GitHub CLI).
 - On Linux/WSL: `gcc-aarch64-linux-gnu`, `hfsprogs` (`mkfs.hfsplus`, `fsck.hfsplus`), `rsync`, [`apfs-fuse`](https://github.com/sgan81/apfs-fuse) (build from source), the `hfsplus` kernel module (on WSL, build it for the WSL kernel and load it with `insmod`), [`ipsw`](https://github.com/blacktop/ipsw).

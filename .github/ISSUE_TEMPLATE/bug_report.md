@@ -4,7 +4,7 @@ about: Something hangs, crashes or does not work as described
 labels: bug
 ---
 
-**Model:** SM-G950F (Samsung firmware / bootloader version: …)
+**Model:** SM-G950F / SM-G950N / other (Samsung firmware / bootloader version: …)
 **Build:** kernel commit or CI run, BOOT image, boot arguments (`cpus=…`)
 
 **What happened**

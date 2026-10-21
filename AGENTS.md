@@ -1,6 +1,6 @@
 # Working on galaxios8 (iOS on the Galaxy S8)
 
-- For Samsung SM-G950F (`dreamlte`, Exynos 8895) work, read `DREAMLTE_PROGRESS.md` first: it is the active handoff. Update it after each milestone and before stopping, and commit completed changes. Record boot numbers, CI run IDs and exact results, and keep observations apart from guesses and from "built but not tested on the phone".
+- For Galaxy S8 work (`dreamlte`, Exynos 8895: SM-G950F upstream, SM-G950N the fork's test phone), read `DREAMLTE_PROGRESS.md` first: it is the active handoff. Update it after each milestone and before stopping, and commit completed changes. Record boot numbers, CI run IDs and exact results, and keep observations apart from guesses and from "built but not tested on the phone".
 - Keep build success, recovered kernel markers, physical screen reports and iOS runtime behavior as separate claims.
 - The phone is written only through TWRP, and only BOOT `sda7` and USERDATA `sda24`. Never touch EFS, recovery, modem, persist or the bootloaders. Confirm each destructive step (flashing, formatting, `dd`) with the user before running it.
 - Keep device dumps, serial numbers, private addresses, passwords and downloaded Apple binaries (IPSW, root images) out of git.

@@ -1,4 +1,4 @@
-# Galaxy S8 (SM-G950F, dreamlte) port — progress
+# Galaxy S8 (SM-G950F / SM-G950N, dreamlte) port — progress
 
 This file is the active handoff for the Galaxy S8 port (repo `galaxios8`, branch `main`; the original work
 lives in `Floppikrob/ios-galaxy-s8`). It ports the A5XELTE work (iOS 16.7 on a Galaxy A5 2016 with
@@ -49,7 +49,7 @@ the bare-metal `s8-probe` (v2–v7) booted from BOOT:
 
 ## Phone results (2026-10-20)
 
-All on the SM-G950F, BOOT `sda7`, CI kernels from this branch, `cpus=1`:
+All on the upstream author's SM-G950F, BOOT `sda7`, CI kernels from this branch, `cpus=1`:
 
 1. CI run 39438201259, 2 GiB RAM: loader → XNU; `Darwin Kernel Version 22.6.0
    … xnu-8796.141.3`, GIC mapped; panic `kmem_range_init: vm_map_locate_space
@@ -151,8 +151,9 @@ Observed on the test phone used for this fork (serial not recorded):
 - Backed up to the git-ignored `backup/` on the host, each read back from the
   phone with matching SHA-256: BOOT `15b66875...ee7bc`, EFS `167dab78...6ffe0`,
   RECOVERY `7b91c6db...f85a4`. Nothing was written to the phone.
-- **Not yet known:** whether the G950N uses the same touch IC, PMIC, fuel gauge
-  and panel as the G950F (same board name, unverified); bootloader lock state.
+- At the time unknown: whether the G950N uses the same touch IC, fuel gauge
+  and panel as the G950F (answered by boot g1 below: yes); bootloader lock
+  state (still not checked, but S-Boot runs our unsigned BOOT image).
 
 ## macOS native build (2026-10-22)
 
