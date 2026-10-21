@@ -1,0 +1,68 @@
+name: loader
+
+# The S8 loader (shim/dreamlte) must build on Linux and macOS. On Linux the
+# image is compared byte for byte with the one the pre-macOS build.sh makes.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "shim/**"
+      - "tools/dreamlte/**"
+      - "tools/dreamlte_mkboot.py"
+      - ".github/workflows/loader.yml"
+  pull_request:
+    paths:
+      - "shim/**"
+      - "tools/dreamlte/**"
+      - "tools/dreamlte_mkboot.py"
+
+concurrency:
+  group: loader-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # last commit before build.sh learned the aarch64-elf fallback
+  OLD_BUILD_REF: 04b41729e89f702261e5599dbe3677e8ee5f5ee3
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Toolchain
+        run: |
+          sudo apt-get update -q
+          # gawk: the old build.sh needs strtonum, which mawk lacks
+          sudo apt-get install -y -q gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu gawk
+      - name: Build with the old script
+        run: |
+          git show "$OLD_BUILD_REF:shim/dreamlte/build.sh" > shim/dreamlte/build-old.sh
+          bash shim/dreamlte/build-old.sh
+          cp shim/dreamlte/out/Image "$RUNNER_TEMP/Image.old"
+          rm -rf shim/dreamlte/out shim/dreamlte/build-old.sh
+      - name: Build with the current script
+        run: bash shim/dreamlte/build.sh
+      - name: Images are identical
+        run: |
+          cmp "$RUNNER_TEMP/Image.old" shim/dreamlte/out/Image
+          sha256sum shim/dreamlte/out/Image
+      - name: Python helpers still import
+        run: python3 -m py_compile tools/dreamlte_mkboot.py tools/mkadt_dreamlte.py tools/mkpayload.py tools/dreamlte_bootimg_info.py
+      - name: Shell scripts parse
+        run: for f in tools/dreamlte/*.sh shim/dreamlte/build.sh; do bash -n "$f"; done
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: brew install aarch64-elf-gcc aarch64-elf-binutils
+      - name: Build
+        run: bash shim/dreamlte/build.sh
+      - name: Python helpers still import
+        run: python3 -m py_compile tools/dreamlte_mkboot.py tools/mkadt_dreamlte.py tools/mkpayload.py tools/dreamlte_bootimg_info.py
+      - name: Shell scripts parse
+        run: for f in tools/dreamlte/*.sh shim/dreamlte/build.sh; do bash -n "$f"; done
