@@ -135,6 +135,25 @@ Observations are on the phone unless marked as a guess.
   now repeats the A53 order (power off, `CPU_ON`, power 0 -> 0xF + DD0,
   `CPU_ON`). **Not yet tested.**
 
+## galaxios8 fork: device check and backup (2026-10-21)
+
+Observed on the test phone used for this fork (serial not recorded):
+
+- It is a **Galaxy S8 SM-G950N** (Korea; bootloader `G950NKSU3CRJ1`), not the
+  SM-G950F the upstream port was done on. Running a Note 9 (`SM-N960N`,
+  `crownlte`) port ROM, so Android props lie; the kernel device tree says
+  `Samsung DREAMLTE EUR rev06 board based on EXYNOS8895`, 8 cores.
+- TWRP 3.4.0-0 (`omni_dreamlte`) is installed; adb root works there.
+  `/dev/block/by-name` does not exist in TWRP: use `sda7`, `sda24` directly.
+- Same layout as the G950F guide: BOOT `sda7` 40 MiB, USERDATA `sda24`
+  ~54.8 GiB, EFS `sda3` 20 MiB, RECOVERY `sda8` 46 MiB. `/sdcard` is on
+  `sda24`, so anything saved there is erased by the iOS root write.
+- Backed up to the git-ignored `backup/` on the host, each read back from the
+  phone with matching SHA-256: BOOT `15b66875...ee7bc`, EFS `167dab78...6ffe0`,
+  RECOVERY `7b91c6db...f85a4`. Nothing was written to the phone.
+- **Not yet known:** whether the G950N uses the same touch IC, PMIC, fuel gauge
+  and panel as the G950F (same board name, unverified); bootloader lock state.
+
 ## Open work
 
 1. Boot the latest kernel/loader: does the frame-done copy remove the tearing,
