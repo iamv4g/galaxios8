@@ -209,8 +209,12 @@ Observed on the test phone used for this fork (serial not recorded):
 - **BOOT** `s8-ios-boot.img` (now with the iPhone X `d22ap` `/product` node),
   17 031 184 bytes, SHA-256 `bfffbcba...b43a`, written to `sda7` and read back.
   Boot args as in `s8-install.md` (`cpus=4`, `sweetfb_native=1`).
-- **Boot g2** started 02:51 (+07). Result not observed yet: with iOS running
-  there is no adb, so the screen (or a later TWRP log pull) will tell.
+- **Boot g2 (02:51 +07): iOS 16.7.16 runs on the SM-G950N.** User photo at
+  3:18: Settings -> General -> About shows iOS Version 16.7.16, Model Name
+  iPhone X, Model/Serial/Wi-Fi Address N/A, Capacity 17 GB, Available 4.06 GB,
+  battery charging, correct local time. The user navigated into Settings, so
+  touch works in iOS. Not yet measured: time to the lock screen, CPU count in
+  use, frame tearing with the frame-done copy, Mongoose start.
 
 ## Open work
 

@@ -4,6 +4,8 @@
 
 This project ports Apple's open-source XNU kernel (xnu-8796, the iOS 16 generation) to the Galaxy S8. On top of it runs the **unmodified iOS 16.7.16 (20H392) userland of the iPhone X**: launchd, the system daemons, backboardd and SpringBoard. The phone reaches the **iOS lock screen**.
 
+> **2026-10-22:** iOS 16.7.16 also boots on the Korean **SM-G950N** (same touch IC, fuel gauge, UFS and panel as the G950F), built entirely on a Mac (see [docs/mac-build.md](docs/mac-build.md)).
+
 > Fork of [Floppikrob/ios-galaxy-s8](https://github.com/Floppikrob/ios-galaxy-s8) (kept as the `upstream` remote). Port history up to boot 31 is from that project; see [Authors](#authors).
 
 > ⚠️ Experimental bring-up, not a usable phone OS. It is very slow and much is missing (see [Known bugs](#known-bugs)). Installing it **erases the USERDATA partition** (all Android data). Exynos **SM-G950F** only.
