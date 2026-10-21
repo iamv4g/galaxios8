@@ -5,18 +5,18 @@
 - The phone is written only through TWRP, and only BOOT `sda7` and USERDATA `sda24`. Never touch EFS, recovery, modem, persist or the bootloaders. Confirm each destructive step (flashing, formatting, `dd`) with the user before running it.
 - Keep device dumps, serial numbers, private addresses, passwords and downloaded Apple binaries (IPSW, root images) out of git.
 - `origin` is the `iamv4g/galaxios8` fork; `upstream` is `Floppikrob/ios-galaxy-s8`. Use `gh` for GitHub Actions kernel builds and logs, and local single-file cross-compiles before spending a CI run.
-- `A5XELTE_PROGRESS.md`, `docs/a5xelte-*.md` (Galaxy A5 2016) and `NOTES.md` (SWEET donor) are history. Do not edit them to imply S8 behavior.
+- Everything in `docs/history/` (Galaxy A5 2016 notes, SWEET donor `NOTES.md`) is history. Do not edit them to imply S8 behavior.
 
 ## Galaxy A5 2016 (A5XELTE) reference
 
-- For SM-A510F work, read `A5XELTE_PROGRESS.md` and `docs/a5xelte-migration-map.md` first and record new device evidence in the former.
+- For SM-A510F work, read `docs/history/A5XELTE_PROGRESS.md` and `docs/history/a5xelte-migration-map.md` first and record new device evidence in the former.
 - Preserve recovery p11, EFS p3 and the existing Linux BOOT checkpoint. XNU trials may write only the explicitly authorized BOOT p10; the donor's Xiaomi `fastboot` and USERDATA instructions are not A5XELTE instructions.
 
 ## Original SWEET contributor instructions (donor reference)
 
-- Read `NOTES.md` before starting; it contains the project goal, hardware facts,
+- Read `docs/history/NOTES.md` before starting; it contains the project goal, hardware facts,
   current blocker, local artifact locations and the next concrete action.
-- The user switches agents frequently. Update the active handoff in `NOTES.md`
+- The user switches agents frequently. Update the active handoff in `docs/history/NOTES.md`
   after each milestone and before stopping. Record commits, CI run IDs, exact
   build/boot results and unfinished work. Distinguish observations from guesses.
 - Commit completed changes. Use `gh` for GitHub Actions kernel builds and logs.

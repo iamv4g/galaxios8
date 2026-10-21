@@ -142,4 +142,4 @@ Observations are on the phone unless marked as a guess.
 2. Mongoose: remaining cores, L2/non-CPU power, then raise the A53 clock.
 3. Zero-copy scanout through the DPU IDMA (needs the SFR update to take effect).
 4. More RAM (512 MiB of 4 GiB), vibration, backlight, Wi-Fi (BCM4361).
-5. Housekeeping: `NOTES.md` and `A5XELTE_PROGRESS.md` stay as donor history.
+5. Housekeeping: `NOTES.md` and `A5XELTE_PROGRESS.md` moved to `docs/history/` as donor history.

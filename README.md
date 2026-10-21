@@ -85,8 +85,7 @@ S-Boot (stock Samsung bootloader, EL1, MMU off)
 | `tools/dreamlte/flash-chunks.ps1` | Writes an image to USERDATA in verified chunks |
 | `tools/dreamlte/pull-sweetlog.ps1` | Pulls the boot logs from TWRP |
 | `DREAMLTE_PROGRESS.md` | **S8 port log**: hardware facts, every boot, open work (the handoff file) |
-| `A5XELTE_PROGRESS.md`, `docs/a5xelte-*.md` | Galaxy A5 2016 history, kept as reference |
-| `NOTES.md`, `docs/upstream-README.md` | Original SWEET (Redmi Note 10 Pro) history, kept as reference |
+| `docs/history/` | Galaxy A5 2016 (`A5XELTE_PROGRESS.md`, `a5xelte-*.md`) and original SWEET / Redmi Note 10 Pro (`NOTES.md`, `upstream-README.md`) history, kept as reference |
 
 ## Authors
 
@@ -97,7 +96,7 @@ S-Boot (stock Samsung bootloader, EL1, MMU off)
 ## Credits
 
 - [orhunnx/ios-a5xelte](https://github.com/orhunnx/ios-a5xelte): the Galaxy A5 2016 port (4 KiB pages, Exynos, S-Boot) this project is based on
-- [dipa-studio/ios-sweet](https://github.com/dipa-studio/ios-sweet): the original iOS 16 port to the Redmi Note 10 Pro (its README: [docs/upstream-README.md](docs/upstream-README.md))
+- [dipa-studio/ios-sweet](https://github.com/dipa-studio/ios-sweet): the original iOS 16 port to the Redmi Note 10 Pro (its README: [docs/history/upstream-README.md](docs/history/upstream-README.md))
 - [MakrSas/LinuxS8](https://github.com/MakrSas/LinuxS8): mainline Linux on the Galaxy S8, the reference for touch, buttons and UFS
 - Mainline Linux (Exynos 8895, HSI2C and S6SY761 drivers), [uniLoader](https://github.com/ivoszbg/uniLoader)
 - Apple's open-source releases (xnu, IOHIDFamily, hfs), [blacktop/darwin-xnu-build](https://github.com/blacktop/darwin-xnu-build), [ipsw](https://github.com/blacktop/ipsw), [apfs-fuse](https://github.com/sgan81/apfs-fuse)
