@@ -1,8 +1,16 @@
-# Working on the A5XELTE fork
+# Working on galaxios8 (iOS on the Galaxy S8)
 
-- For Samsung SM-A510F work, read `A5XELTE_PROGRESS.md` and `docs/a5xelte-migration-map.md` first. Record new device evidence in the former and commit completed changes. Keep private VM addresses, passwords, device dumps and downloaded Apple binaries out of git.
-- Preserve recovery p11, EFS p3 and the existing Linux BOOT checkpoint. Current XNU trials may write only the explicitly authorized BOOT p10; the donor's Xiaomi `fastboot` and USERDATA instructions are not A5XELTE instructions.
-- Keep build success, recovered kernel markers, physical screen reports and iOS runtime behavior as separate claims. `NOTES.md` below is SWEET donor history; do not edit it to imply Samsung behavior.
+- For Samsung SM-G950F (`dreamlte`, Exynos 8895) work, read `DREAMLTE_PROGRESS.md` first: it is the active handoff. Update it after each milestone and before stopping, and commit completed changes. Record boot numbers, CI run IDs and exact results, and keep observations apart from guesses and from "built but not tested on the phone".
+- Keep build success, recovered kernel markers, physical screen reports and iOS runtime behavior as separate claims.
+- The phone is written only through TWRP, and only BOOT `sda7` and USERDATA `sda24`. Never touch EFS, recovery, modem, persist or the bootloaders. Confirm each destructive step (flashing, formatting, `dd`) with the user before running it.
+- Keep device dumps, serial numbers, private addresses, passwords and downloaded Apple binaries (IPSW, root images) out of git.
+- `origin` is the `iamv4g/galaxios8` fork; `upstream` is `Floppikrob/ios-galaxy-s8`. Use `gh` for GitHub Actions kernel builds and logs, and local single-file cross-compiles before spending a CI run.
+- `A5XELTE_PROGRESS.md`, `docs/a5xelte-*.md` (Galaxy A5 2016) and `NOTES.md` (SWEET donor) are history. Do not edit them to imply S8 behavior.
+
+## Galaxy A5 2016 (A5XELTE) reference
+
+- For SM-A510F work, read `A5XELTE_PROGRESS.md` and `docs/a5xelte-migration-map.md` first and record new device evidence in the former.
+- Preserve recovery p11, EFS p3 and the existing Linux BOOT checkpoint. XNU trials may write only the explicitly authorized BOOT p10; the donor's Xiaomi `fastboot` and USERDATA instructions are not A5XELTE instructions.
 
 ## Original SWEET contributor instructions (donor reference)
 

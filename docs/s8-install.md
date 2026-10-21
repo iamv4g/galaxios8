@@ -27,7 +27,7 @@ adb pull /sdcard/BOOT.img backup/BOOT.img
 
 The kernel is built on GitHub Actions macOS runners (free for public repositories).
 
-1. Fork this repository.
+1. Fork this repository (`iamv4g/galaxios8`).
 2. Actions → **xnu** → *Run workflow* (`machine_config` = `A5XELTE`, the default). A build also starts on every change to `xnu/patches/**`.
 3. Download the artifact:
 
@@ -79,7 +79,7 @@ The kernel uses the last 4 MiB of USERDATA as its log ring; a 16 GB image does n
 bash tools/dreamlte/make-boot.sh xnu/out/kernel.development.a5xelte backup/BOOT.img s8-ios-boot.img \
   debug=0xc serial=3 cpus=4 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 ufsroot=USERDATA \
   unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 \
-  launchd_unsecure_cache=1 wdt=-1 a5touchprobe=0 a5fb_keep_on=1 a5fb_noconsole=1 sweetfb_native=1
+  launchd_unsecure_cache=1 wdt=-1 a5touchprobe=0 a5fb_noconsole=1 sweetfb_native=1
 ```
 
 The script builds the ADT (`tools/mkadt_dreamlte.py`) and the payload (`tools/mkpayload.py`), compiles the `shim/dreamlte` loader and packs BOOT with the stock header.
@@ -97,7 +97,7 @@ First check that `sda7` really is BOOT: `adb shell ls -l /dev/block/by-name/BOOT
 ## 6. Booting
 
 - The loader's text comes first, then the Apple logo. Reaching the lock screen takes **about 15 minutes** (CPU rendering).
-- `cpus=1` is more stable; `cpus=4` is faster early on but can still stall (see the README).
+- `cpus=4` is the normal setting since the physical-timer fix (boot 25). `cpus=1` is a fallback for debugging; the Mongoose cores cannot be started yet, so do not go above 4.
 
 ### Back to TWRP
 
@@ -124,7 +124,9 @@ Restore BOOT and Data from the TWRP backup (or `dd` the saved `BOOT.img` back to
 | `cpus=N` | How many A53 cores to start (1–4) |
 | `rd=ufsroot0 ufsroot=USERDATA` | Root is the HFS+ volume in USERDATA |
 | `ufsrw=1 rootrw=1` | Root mounted read/write |
-| `sweetfb_native=1` | Present the 1440×2960 panel to iOS (1125×2436 hangs for now) |
+| `sweetfb_native=1` | Present the full 1440×2960 panel to iOS. `0` gives the faster centered 1125×2436 area |
+| `a5fb_keep_on=1` | Keep the panel on; leave it out so that locking the phone blanks the screen |
+| `sweetfb_hz=N` | Limit the CPU copy to the panel to N frames per second |
 | `a5fb_noconsole=1` | Do not draw the kernel console over iOS |
 | `a5touchprobe=0` | Disable the Galaxy A5 touch probe (it aborts on the S8) |
 | `wdt=-1 wdt_test=no_user_checkin` | No watchdogs (the system is slow) |

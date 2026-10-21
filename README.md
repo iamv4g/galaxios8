@@ -1,8 +1,10 @@
-# iOS on the Samsung Galaxy S8
+# galaxios8: iOS on the Samsung Galaxy S8
 
 **iOS 16.7 on the Samsung Galaxy S8 (SM-G950F, Exynos 8895, `dreamlte`).**
 
 This project ports Apple's open-source XNU kernel (xnu-8796, the iOS 16 generation) to the Galaxy S8. On top of it runs the **unmodified iOS 16.7.16 (20H392) userland of the iPhone X**: launchd, the system daemons, backboardd and SpringBoard. The phone reaches the **iOS lock screen**.
+
+> Fork of [Floppikrob/ios-galaxy-s8](https://github.com/Floppikrob/ios-galaxy-s8) (kept as the `upstream` remote). Port history up to boot 31 is from that project; see [Authors](#authors).
 
 > ⚠️ Experimental bring-up, not a usable phone OS. It is very slow and much is missing (see [Known bugs](#known-bugs)). Installing it **erases the USERDATA partition** (all Android data). Exynos **SM-G950F** only.
 
@@ -15,19 +17,20 @@ This project ports Apple's open-source XNU kernel (xnu-8796, the iOS 16 generati
 | Memory | 512 MiB of the upper bank at `0x880000000` |
 | Storage | Own Exynos UFS driver. The iOS root is HFS+ in USERDATA (`sda24`), read/write |
 | iOS userland | iPhone X 16.7.16 root filesystem and shared cache; launchd, daemons, backboardd, SpringBoard |
-| Display | S-Boot framebuffer, 1440×2960 (DECON in command mode). CoreAnimation renders on the CPU |
-| GUI | Apple logo, iOS lock screen (confirmed on the device) |
+| Display | S-Boot framebuffer, 1440×2960 (DECON in command mode). CoreAnimation renders on the CPU; each frame is copied into panel memory right after a DECON frame-done (boot 31 code, tearing fix not yet confirmed on the phone) |
+| GUI | Apple logo, lock screen, home screen, App Library, Control Center (boot 31 video) |
 | Buttons | Power, volume up/down, Bixby (ALIVE GPIOs) → HID events (seen in the log) |
 | Clock | Date and time from the S2MPS17 RTC, read by the loader |
 | Touch | S6SY761 on `hsi2c_23`: the loader powers its rails (S2MPS17 LDO34/35 over SPEEDY), a polled kernel driver feeds HID touch events; taps and swipes reach SpringBoard |
+| Battery | Real level and voltage from the MAX77865 fuel gauge on `hsi2c_32` (boot 29: 99 %, 4149 mV); charger state from the same chip |
 | Logs | No need to film the screen: loader and kernel log in ramoops (pmsg) plus a 4 MiB ring at the end of USERDATA, read from TWRP |
 
 ## Known bugs
 
 - **Very slow and laggy.** All rendering is on the CPU, there is no GPU. About 15 minutes to the lock screen on one core.
-- The iPhone X 1125×2436 mode hangs on its first frame; the native 1440×2960 mode is used (`sweetfb_native=1`).
-- The Mongoose (big) cluster does not start yet: its L2/cluster power must be enabled.
-- No battery / charging readout (no fuel gauge driver).
+- Frames tear (top of one screen, bottom of the next) because DECON scans the panel memory while AppleCLCD copies into it. Patched in the latest commit, not yet verified on the phone.
+- The centered iPhone X 1125×2436 presentation is faster; the full-screen 1440×2960 mode (`sweetfb_native=1`) is the default.
+- The Mongoose (big) cluster does not start yet: cluster 0 and core 0x000 report powered, `CPU_ON` returns 0, but the core never reaches the entry (boot 31).
 - No Wi-Fi, Bluetooth, cellular, audio, cameras, sensors, GPS or SEP / Face ID.
 - **No GPU.** The Mali-G71 cannot run iOS's Metal / AGX drivers, so hardware graphics is not realistic.
 - Security is off: permissive AMFI/sandbox, stub AppleKeyStore. Do not put anything personal on it.
@@ -37,10 +40,10 @@ This project ports Apple's open-source XNU kernel (xnu-8796, the iOS 16 generati
 - [x] S6SY761 touch driver in XNU
 - [x] Fix the 4-core stalls (physical timer)
 - [ ] Bring up the Mongoose cluster (4 more cores), raise the A53 clock (now ~1050 of 1690 MHz)
-- [ ] Faster display path: zero-copy scanout through the DPU input DMA (probe in progress), 1125x2436 presentation (being tested)
-- [ ] 1125×2436 mode without the hang
+- [ ] Tear-free display: verify the frame-done copy; zero-copy scanout through the DPU input DMA (probe only, moving the IDMA base had no visible effect in boot 28)
+- [x] 1125×2436 presentation (canvas fix in `cf8366b`; the faster mode, but full-screen stays the default)
 - [x] RTC (date/time)
-- [ ] Battery stub or driver (MAX77865 fuel gauge)
+- [x] Battery (MAX77865 fuel gauge)
 - [ ] More RAM (512 MiB of 4 GiB today)
 - [ ] Vibration motor, backlight brightness
 - [ ] Wi-Fi (BCM4361): a large job
@@ -53,7 +56,7 @@ Step-by-step guide: **[docs/s8-install.md](docs/s8-install.md)**.
 
 In short:
 1. An unlocked SM-G950F with TWRP and a full partition backup.
-2. The XNU kernel is built on GitHub Actions (workflow `xnu`, `MACHINE_CONFIG=A5XELTE`).
+2. Fork this repository; the XNU kernel is built on GitHub Actions (workflow `xnu`, `MACHINE_CONFIG=A5XELTE`).
 3. The iOS root image is built from the iPhone X 16.7.16 IPSW, which you download yourself, and is written to USERDATA.
 4. `tools/dreamlte/make-boot.sh` builds the BOOT image (loader + XNU + Apple Device Tree), which is written to `sda7` from TWRP.
 
@@ -81,11 +84,14 @@ S-Boot (stock Samsung bootloader, EL1, MMU off)
 | `tools/mkiosroot.sh`, `tools/dreamlte/finish-iosroot.sh` | iOS root image build |
 | `tools/dreamlte/flash-chunks.ps1` | Writes an image to USERDATA in verified chunks |
 | `tools/dreamlte/pull-sweetlog.ps1` | Pulls the boot logs from TWRP |
-| `DREAMLTE_PROGRESS.md` | Port log: hardware facts, every boot |
+| `DREAMLTE_PROGRESS.md` | **S8 port log**: hardware facts, every boot, open work (the handoff file) |
+| `A5XELTE_PROGRESS.md`, `docs/a5xelte-*.md` | Galaxy A5 2016 history, kept as reference |
+| `NOTES.md`, `docs/upstream-README.md` | Original SWEET (Redmi Note 10 Pro) history, kept as reference |
 
 ## Authors
 
-- [@Floppikrob](https://github.com/Floppikrob): Galaxy S8 port
+- [@Floppikrob](https://github.com/Floppikrob): Galaxy S8 port (original [ios-galaxy-s8](https://github.com/Floppikrob/ios-galaxy-s8))
+- [@iamv4g](https://github.com/iamv4g): galaxios8 fork, continued work
 - [@MakrSas](https://github.com/MakrSas): contributor, mainline Linux on the S8 ([LinuxS8](https://github.com/MakrSas/LinuxS8))
 
 ## Credits

@@ -1,6 +1,7 @@
 # Galaxy S8 (SM-G950F, dreamlte) port — progress
 
-Branch `s8-dreamlte` ports the A5XELTE work (iOS 16.7 on a Galaxy A5 2016 with
+This file is the active handoff for the Galaxy S8 port (repo `galaxios8`, branch `main`; the original work
+lives in `Floppikrob/ios-galaxy-s8`). It ports the A5XELTE work (iOS 16.7 on a Galaxy A5 2016 with
 4 KiB pages, Cortex-A53, GICv2, Samsung S-Boot) to the Galaxy S8, Exynos 8895.
 Observations on the phone and build results are kept apart from plans.
 
@@ -90,8 +91,55 @@ to the pmsg zone and read from TWRP as `/sys/fs/pstore/pmsg-ramoops-0`.
   SwapBegin never completed. **Boot 19 (`sweetfb_native=1`, 1440x2960): iOS
   lock screen on the Galaxy S8**, one CPU, CPU rendering, ~15 min to reach it.
 
-## Next
+## Boots 19-31 (2026-10-20/21)
 
-1. CI kernel build; first boot target: loader log + XNU entry marker, then the
-   early XNU console on the S8 screen.
-2. UFS driver for the root filesystem (USERDATA), then the iPhone X root.
+Taken from the commit messages of the upstream author; boot numbers are theirs.
+Observations are on the phone unless marked as a guess.
+
+- **SMP.** Boot 19 (loader probe): `CPU_ON` alone never starts a core; after
+  `CPUn_CONFIGURATION |= 0xF` (as Samsung's `exynos-pmu.c`) the A53 at MPIDR
+  0x101 started. Boot 20: kernel still lacked the 0 -> 0xF power edge, so it
+  now power-cycles the core around `CPU_ON`. Boot 21: still no core; the
+  firmware keeps the `CPU_ON` entry in a 32-bit PMU INFORM register, so a
+  low trampoline (`ldr/br` at `0x8f000000`) is passed instead of the >4 GiB
+  XNU entry. Boot 22: 4/4 A53 cores up.
+- **Keys.** Power GPA2-4, volume up GPA0-3, volume down GPA0-4, Bixby GPA0-6
+  (as Home), ALIVE pinctrl `0x164b0000`. DAT offsets were wrong until
+  boot 22 (GPA0 `0x020`, GPA2 `0x060`, DAT `+4`); boot 24: all four reach HID.
+- **4-core stall.** Boots 22-24: rendering stalled because timed wakeups
+  failed off the boot CPU (CoreAnimation's `dispatch_apply` waiting for
+  workqueue threads). Samsung's DT marks the arch timer `use-physical-timer`,
+  so DREAMLTE uses `CNTP_*`, PPI 14 (INTID 30). Boot 25: stall gone.
+- **Touch.** S6SY761 (`sec,sec_ts`) on USI09 HSI2C `0x108e0000`, IRQ gpa1-0.
+  Boot 25: every transfer timed out (SDA held low) because S-Boot leaves
+  S2MPS17 LDO34 (1.85 V) / LDO35 (3.0 V) off; `pmic.c` enables them over
+  SPEEDY. Boot 26: boot status 0x20, id 0xac3761, firmware ok. Kernel driver
+  polls the interrupt line from a thread. Boot 27: 77 touches reached
+  SpringBoard.
+- **Clock.** The loader decodes the S2MPS17 RTC and appends `s8rtc=`; boot 27:
+  launchd logged the real date.
+- **Battery.** MAX77865 on `hsi2c_32` (USI13): fuel gauge `0x36`, charger
+  `0x69`; 3000 mAh. Boot 29: 99 %, 4149 mV.
+- **Display.** Boot 27-28: the 1125x2436 presentation stalled while the ADT
+  still announced a 1440x2960 canvas; the canvas now follows the presented
+  size. DECON_F/IDMA0 scan `0xcc000000` with the DPU SYSMMUs off. Boot 28:
+  moving the IDMA base with only a DECON global update changed nothing on
+  screen. Boot 29 (`sweetfb_hz=30`): heavy artifacts; copy moved to SwapEnd.
+  Boot 30: back to full-screen 1440x2960, without `a5fb_keep_on` so locking
+  blanks the panel. Boot 31 (video): lock screen, home screen, App Library,
+  Control Center work, but frames tear; each copy now starts right after a
+  DECON frame-done (**not yet tested on the phone**).
+- **Mongoose cluster.** `mngs_probe` follows Samsung's
+  `pmucal_cpu_exynos8895.h` (`cluster0_on`, `cpu00_on`). Boot 31: cluster and
+  core 0x000 status 0xf, `CPU_ON` rc 0, core never ran the entry. The probe
+  now repeats the A53 order (power off, `CPU_ON`, power 0 -> 0xF + DD0,
+  `CPU_ON`). **Not yet tested.**
+
+## Open work
+
+1. Boot the latest kernel/loader: does the frame-done copy remove the tearing,
+   and does the new Mongoose order start core 0x000?
+2. Mongoose: remaining cores, L2/non-CPU power, then raise the A53 clock.
+3. Zero-copy scanout through the DPU IDMA (needs the SFR update to take effect).
+4. More RAM (512 MiB of 4 GiB), vibration, backlight, Wi-Fi (BCM4361).
+5. Housekeeping: `NOTES.md` and `A5XELTE_PROGRESS.md` stay as donor history.
