@@ -214,8 +214,24 @@ Observed on the test phone used for this fork (serial not recorded):
   3:18: Settings -> General -> About shows iOS Version 16.7.16, Model Name
   iPhone X, Model/Serial/Wi-Fi Address N/A, Capacity 17 GB, Available 4.06 GB,
   battery charging, correct local time. The user navigated into Settings, so
-  touch works in iOS. Not yet measured: time to the lock screen, CPU count in
-  use, frame tearing with the frame-done copy, Mongoose start.
+  touch works in iOS. The screen showed 3:18 for a photo taken at 22:18 UTC:
+  correct time, in iOS's default Cupertino time zone (PDT). Not yet measured:
+  time to the lock screen, frame tearing with the frame-done copy.
+- **g2's kernel log is lost.** Going from iOS to TWRP with the key combo first
+  booted iOS again for ~4 minutes (boot g3: `s8rtc` = 23:50:10 UTC, the RTC
+  read 23:54 in TWRP right after), and g3 started a fresh log ring. Lesson:
+  hold Power + Bixby + Volume Up the moment the screen goes dark, or the ring
+  is overwritten. pmsg was empty after that forced reboot.
+- **Boot g3 log** (`logs/sweetlog-g2.*`, misnamed at the time, 1758 lines):
+  `4/4 CPUs initialized, SGI1 verified` (A53 0x100-0x103, low trampoline);
+  `hfs: mounted iOSRoot`, root unsealed (error 25, expected); launchd,
+  SpringBoard, backboardd and ~100 xpcproxy services started; AppleCLCD swaps
+  at 1440x2960; S6SY761 touch down/up events reach HID; buttons registered.
+  **Battery fell back to the static value** (`static fallback, 100% 4200mV`)
+  while boot g1 had read the MAX77865 (83 %, 4244 mV): fuel gauge read is not
+  reliable on every boot, cause unknown. Errors seen are the usual unsupported
+  pieces (BindFS lookups for Pearl/FactoryData, usermanagerd personas, logd
+  privilege denied by the sandbox stand-in); no panic in the log.
 
 ## Open work
 

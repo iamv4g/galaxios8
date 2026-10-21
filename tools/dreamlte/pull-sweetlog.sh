@@ -11,7 +11,9 @@ repo=$(cd "$(dirname "$0")/../.." && pwd)
 mkdir -p "$repo/logs"
 adb shell 'b=$(blockdev --getsize64 /dev/block/sda24); dd if=/dev/block/sda24 of=/tmp/slog.bin bs=4096 skip=$((b/4096-1025)) count=1025 2>/dev/null'
 adb pull /tmp/slog.bin "$repo/logs/sweetlog-$name.bin" >/dev/null
-adb pull /sys/fs/pstore/pmsg-ramoops-0 "$repo/logs/pmsg-$name.txt" >/dev/null
+# pmsg survives a warm reboot only; after a forced power cycle pstore is empty.
+adb pull /sys/fs/pstore/pmsg-ramoops-0 "$repo/logs/pmsg-$name.txt" >/dev/null ||
+	echo "no pmsg-ramoops-0 (pstore empty after this reboot)" >&2
 python3 "$repo/tools/sweet-log.py" "$repo/logs/sweetlog-$name.bin" "$repo/logs/sweetlog-$name.txt"
 echo "kernel log: logs/sweetlog-$name.txt"
 echo "pmsg log:   logs/pmsg-$name.txt"

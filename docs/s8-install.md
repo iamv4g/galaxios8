@@ -102,7 +102,7 @@ First check that `sda7` really is BOOT: `adb shell ls -l /dev/block/by-name/BOOT
 
 ### Back to TWRP
 
-Hold **Power + Volume Down** (reboot); as soon as the screen goes dark, hold **Power + Bixby + Volume Up**.
+Hold **Power + Volume Down** (reboot); as soon as the screen goes dark, hold **Power + Bixby + Volume Up**. Be quick: if iOS starts booting again first, it begins a new kernel log ring and the previous boot's log is lost.
 
 ### Logs
 
