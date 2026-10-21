@@ -46,11 +46,9 @@ touch "$progress"
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
 
-python3 -c '
-import json,sys
-for c in json.load(open(sys.argv[1]))["chunks"]:
-    print(c["i"], c["sha"], 1 if c["zero"] else 0)' "$manifest" |
-while read -r i sha zero; do
+# The chunk list comes in on fd 3: adb shell reads stdin and would swallow it
+# (the first version of this script wrote chunk 0 only and reported success).
+while read -r i sha zero <&3; do
 	grep -qx "$i" "$progress" && continue
 	for try in 1 2 3 4 5 6 7 8; do
 		ok=0
@@ -72,6 +70,11 @@ while read -r i sha zero; do
 		for _ in $(seq 15); do adb get-state >/dev/null 2>&1 && break; sleep 2; done
 	done
 	if (( i % 16 == 0 )); then echo "chunk $((i + 1))/$n"; fi
-done
-adb shell sync
+done 3< <(python3 -c '
+import json,sys
+for c in json.load(open(sys.argv[1]))["chunks"]:
+    print(c["i"], c["sha"], 1 if c["zero"] else 0)' "$manifest")
+adb shell sync </dev/null
+got=$(sort -u "$progress" | wc -l | tr -d ' ')
+(( got == n )) || { echo "only $got of $n chunks verified; run again" >&2; exit 1; }
 echo "all $n chunks written and verified on $dev"
