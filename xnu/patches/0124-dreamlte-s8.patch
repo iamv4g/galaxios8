@@ -734,7 +734,7 @@ index 6b926fe..b778e7d 100644
  	thread_t thread;
  
 diff --git bsd/kern/kern_exec.c bsd/kern/kern_exec.c
-index deccec2..8919441 100644
+index deccec2..4c34bce 100644
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
 @@ -368,6 +368,34 @@ struct exec_port_actions {
@@ -772,13 +772,16 @@ index deccec2..8919441 100644
  static int exec_copyout_strings(struct image_params *imgp, user_addr_t *stackp);
  static int load_return_to_errno(load_return_t lrtn);
  static int execargs_alloc(struct image_params *imgp);
-@@ -7413,6 +7441,13 @@ process_signature(proc_t p, struct image_params *imgp)
+@@ -7413,6 +7441,16 @@ process_signature(proc_t p, struct image_params *imgp)
  			}
  #if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
  			/* A short line keeps the persistent console ring useful. */
 +#if defined(ARM64_BOARD_CONFIG_A5XELTE)
 +			if (s8_exec_denied(p->p_name)) {
 +				printf("exec %s denied (s8noexec)\n", p->p_name);
++				/* done: asserts a reason for every failure here (run p6 panic). */
++				signature_failure_reason = os_reason_create(OS_REASON_EXEC,
++				    EXEC_EXIT_REASON_WRONG_PLATFORM);
 +				error = EPERM;
 +				goto done;
 +			}
