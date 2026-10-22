@@ -1198,6 +1198,183 @@ edit('iokit/Kernel/arm/SweetFramebuffer.cpp', [
      '\t\t\tsweet_fb_copy(panel + (uint64_t)dy * tgtStride + (uint64_t)dx * 4, tgtStride,\n', 1),
 ])
 
+# Smoothness, step 4 (run p7: 1125x2436 scaled, still ~33 frames/s peak).
+# The presenter held fPresentLock for its 15.5 ms scale, so the next SwapEnd
+# waited for it (the 2.4 ms "snapshot" figure starts after the lock), and the
+# scale wrote 4-byte pixels straight into write-combined panel memory.
+# Now: two stage buffers with their own small lock (the render thread writes
+# one while the presenter reads the other, and never waits for it), the
+# snapshot is a single-threaded copy so the helper pool belongs to the
+# presenter alone, and each scaled row is built in cached memory and written
+# to the panel in one copy.
+edit('iokit/Kernel/arm/SweetFramebuffer.cpp', [
+    # job: a cached row buffer per job
+    ('\tint kind;        /* 0 copy rows, 1 scale output rows y0.. */\n'
+     '\tint32_t y0;\n'
+     '};\n',
+     '\tint kind;        /* 0 copy rows, 1 scale output rows y0.. */\n'
+     '\tint32_t y0;\n'
+     '\tuint32_t *row;   /* scale: cached row of sweet_fb_out_w pixels */\n'
+     '};\n'
+     'static uint32_t *sweet_fb_rowbufs[4];\n', 1),
+    ('\tfor (int32_t y = j->y0; y < j->y0 + j->rows; y++) {\n'
+     '\t\tuint32_t *out = (uint32_t *)(j->dst + (uint64_t)y * j->dstride) + sweet_fb_out_x0;\n'
+     '\t\tif (y > j->y0 && sweet_fb_ymap[y] == sweet_fb_ymap[y - 1]) {\n'
+     '\t\t\tmemcpy(out, (const uint32_t *)(j->dst + (uint64_t)(y - 1) * j->dstride) + sweet_fb_out_x0,\n'
+     '\t\t\t    (size_t)sweet_fb_out_w * 4);\n'
+     '\t\t\tcontinue;\n'
+     '\t\t}\n'
+     '\t\tconst uint32_t *in = (const uint32_t *)(j->src + (uint64_t)sweet_fb_ymap[y] * j->sstride);\n'
+     '\t\tfor (uint32_t x = 0; x < sweet_fb_out_w; x++) {\n'
+     '\t\t\tout[x] = in[sweet_fb_xmap[x]];\n'
+     '\t\t}\n'
+     '\t}\n',
+     '\tint32_t built = -1;      /* stage row now in j->row */\n'
+     '\tfor (int32_t y = j->y0; y < j->y0 + j->rows; y++) {\n'
+     '\t\tuint32_t *out = (uint32_t *)(j->dst + (uint64_t)y * j->dstride) + sweet_fb_out_x0;\n'
+     '\t\tif (sweet_fb_ymap[y] != built) {\n'
+     '\t\t\tconst uint32_t *in = (const uint32_t *)(j->src + (uint64_t)sweet_fb_ymap[y] * j->sstride);\n'
+     '\t\t\tfor (uint32_t x = 0; x < sweet_fb_out_w; x++) {\n'
+     '\t\t\t\tj->row[x] = in[sweet_fb_xmap[x]];\n'
+     '\t\t\t}\n'
+     '\t\t\tbuilt = sweet_fb_ymap[y];\n'
+     '\t\t}\n'
+     '\t\tmemcpy(out, j->row, (size_t)sweet_fb_out_w * 4);\n'
+     '\t}\n', 1),
+    ('\t\tsweet_fb_jobs[i] = (struct sweet_fb_copy_job){\n'
+     '\t\t\tdst, src, dstride, sstride, 0, per, 1, at };\n',
+     '\t\tsweet_fb_jobs[i] = (struct sweet_fb_copy_job){\n'
+     '\t\t\tdst, src, dstride, sstride, 0, per, 1, at, sweet_fb_rowbufs[i] };\n', 1),
+    ('\tstruct sweet_fb_copy_job mine = { dst, src, dstride, sstride, 0, rows - at, 1, at };\n',
+     '\tstruct sweet_fb_copy_job mine = { dst, src, dstride, sstride, 0, rows - at, 1, at,\n'
+     '\t\tsweet_fb_rowbufs[SWEET_FB_COPY_HELPERS] };\n', 1),
+    ('\t\tstruct sweet_fb_copy_job all = { dst, src, dstride, sstride, 0, rows, 1, 0 };\n',
+     '\t\tstruct sweet_fb_copy_job all = { dst, src, dstride, sstride, 0, rows, 1, 0,\n'
+     '\t\t\tsweet_fb_rowbufs[0] };\n', 1),
+    # two stages and their lock
+    ('static uint32_t sweet_fb_stage_w, sweet_fb_stage_h;\n',
+     'static uint32_t sweet_fb_stage_w, sweet_fb_stage_h;\n'
+     'static IOLock *sweet_fb_stage_lock;      /* only around the indices below */\n'
+     'static uintptr_t sweet_fb_stages[2];\n'
+     'static int sweet_fb_ready = -1, sweet_fb_busy = -1;\n', 1),
+    # presenter: takes the ready stage under the stage lock only
+    ('\tfor (;;) {\n'
+     '\t\tIOLockLock(sweet_fb_present_lock);\n'
+     '\t\twhile (!sweet_fb_stage_pending) {\n'
+     '\t\t\tIOLockSleep(sweet_fb_present_lock, &sweet_fb_stage_pending, THREAD_UNINT);\n'
+     '\t\t}\n'
+     '\t\tIOLockUnlock(sweet_fb_present_lock);\n'
+     '\t\tuint64_t t0 = mach_absolute_time();\n'
+     '\t\tsweet_fb_wait_frame_done();\n'
+     '\t\tuint64_t t1 = mach_absolute_time();\n'
+     '\t\tIOLockLock(sweet_fb_present_lock);\n'
+     '\t\tsweet_fb_stage_pending = false;\n',
+     '\tfor (;;) {\n'
+     '\t\tIOLockLock(sweet_fb_stage_lock);\n'
+     '\t\twhile (sweet_fb_ready < 0) {\n'
+     '\t\t\tIOLockSleep(sweet_fb_stage_lock, &sweet_fb_ready, THREAD_UNINT);\n'
+     '\t\t}\n'
+     '\t\tIOLockUnlock(sweet_fb_stage_lock);\n'
+     '\t\tuint64_t t0 = mach_absolute_time();\n'
+     '\t\tsweet_fb_wait_frame_done();\n'
+     '\t\tuint64_t t1 = mach_absolute_time();\n'
+     '\t\tIOLockLock(sweet_fb_stage_lock);\n'
+     '\t\tint b = sweet_fb_ready;\n'
+     '\t\tsweet_fb_ready = -1;\n'
+     '\t\tsweet_fb_busy = b;\n'
+     '\t\tIOLockUnlock(sweet_fb_stage_lock);\n'
+     '\t\tif (b < 0) {\n'
+     '\t\t\tcontinue;\n'
+     '\t\t}\n'
+     '\t\tsweet_fb_stage = sweet_fb_stages[b];\n', 1),
+    ('\t\t\tsweet_fb_copy(sweet_fb_panel, sweet_fb_stride, sweet_fb_stage, sweet_fb_stride,\n'
+     '\t\t\t    sweet_fb_stride, sweet_fb_rows);\n'
+     '\t\t}\n'
+     '\t\tIOLockUnlock(sweet_fb_present_lock);\n',
+     '\t\t\tsweet_fb_copy(sweet_fb_panel, sweet_fb_stride, sweet_fb_stage, sweet_fb_stride,\n'
+     '\t\t\t    sweet_fb_stride, sweet_fb_rows);\n'
+     '\t\t}\n'
+     '\t\tIOLockLock(sweet_fb_stage_lock);\n'
+     '\t\tsweet_fb_busy = -1;\n'
+     '\t\tIOLockUnlock(sweet_fb_stage_lock);\n', 1),
+    # stage set-up: two buffers, row buffers, the stage lock
+    ('\t\tuintptr_t stage = (uintptr_t)IOMallocData((vm_size_t)stage_bytes);\n',
+     '\t\tuintptr_t stage = (uintptr_t)IOMallocData((vm_size_t)stage_bytes);\n'
+     '\t\tuintptr_t stage2 = stage ? (uintptr_t)IOMallocData((vm_size_t)stage_bytes) : 0;\n'
+     '\t\tsweet_fb_stage_lock = IOLockAlloc();\n'
+     '\t\tif (stage2 == 0 || sweet_fb_stage_lock == NULL) {\n'
+     '\t\t\tif (stage != 0) {\n'
+     '\t\t\t\tIOFreeData((void *)stage, (vm_size_t)stage_bytes);\n'
+     '\t\t\t}\n'
+     '\t\t\tstage = 0;\n'
+     '\t\t}\n', 1),
+    ('\t\t\tsweet_fb_ymap = (uint16_t *)IOMallocData(fHeight * sizeof(uint16_t));\n'
+     '\t\t\tif (sweet_fb_xmap == NULL || sweet_fb_ymap == NULL) {\n',
+     '\t\t\tsweet_fb_ymap = (uint16_t *)IOMallocData(fHeight * sizeof(uint16_t));\n'
+     '\t\t\tbool rows_ok = true;\n'
+     '\t\t\tfor (int i = 0; i <= SWEET_FB_COPY_HELPERS; i++) {\n'
+     '\t\t\t\tsweet_fb_rowbufs[i] = (uint32_t *)IOMallocData(sweet_fb_out_w * 4);\n'
+     '\t\t\t\trows_ok = rows_ok && sweet_fb_rowbufs[i] != NULL;\n'
+     '\t\t\t}\n'
+     '\t\t\tif (sweet_fb_xmap == NULL || sweet_fb_ymap == NULL || !rows_ok) {\n', 1),
+    ('\t\t\t\tIOFreeData((void *)stage, (vm_size_t)stage_bytes);\n'
+     '\t\t\t\tstage = 0;\n'
+     '\t\t\t} else {\n',
+     '\t\t\t\tIOFreeData((void *)stage, (vm_size_t)stage_bytes);\n'
+     '\t\t\t\tIOFreeData((void *)stage2, (vm_size_t)stage_bytes);\n'
+     '\t\t\t\tstage = 0;\n'
+     '\t\t\t} else {\n', 1),
+    ('\t\t\t\tbzero((void *)stage, (size_t)stage_bytes);\n',
+     '\t\t\t\tbzero((void *)stage, (size_t)stage_bytes);\n'
+     '\t\t\t\tbzero((void *)stage2, (size_t)stage_bytes);\n', 1),
+    ('\t\t\tif (!sweet_fb_scaled) {\n'
+     '\t\t\t\tsweet_fb_copy(stage, fRowBytes, fPixels, fRowBytes, fRowBytes, (int32_t)fHeight);\n'
+     '\t\t\t}\n',
+     '\t\t\tif (!sweet_fb_scaled) {\n'
+     '\t\t\t\tsweet_fb_copy(stage, fRowBytes, fPixels, fRowBytes, fRowBytes, (int32_t)fHeight);\n'
+     '\t\t\t\tsweet_fb_copy(stage2, fRowBytes, fPixels, fRowBytes, fRowBytes, (int32_t)fHeight);\n'
+     '\t\t\t}\n'
+     '\t\t\tsweet_fb_stages[0] = stage;\n'
+     '\t\t\tsweet_fb_stages[1] = stage2;\n', 1),
+    # present: pick the stage the presenter is not reading
+    ('\tuintptr_t panel = sweet_fb_stage != 0 ? sweet_fb_stage : fPixels;\n',
+     '\tint slot = -1;\n'
+     '\tif (sweet_fb_stage != 0) {\n'
+     '\t\tIOLockLock(sweet_fb_stage_lock);\n'
+     '\t\tslot = sweet_fb_busy == 0 ? 1 : (sweet_fb_busy == 1 ? 0 : (sweet_fb_ready == 0 ? 1 : 0));\n'
+     '\t\tif (sweet_fb_ready == slot) {\n'
+     '\t\t\tsweet_fb_ready = -1;        /* replaced by this newer frame */\n'
+     '\t\t}\n'
+     '\t\tIOLockUnlock(sweet_fb_stage_lock);\n'
+     '\t}\n'
+     '\tuintptr_t panel = slot >= 0 ? sweet_fb_stages[slot] : fPixels;\n', 1),
+    ('\t\t\tsweet_fb_copy(panel + (uint64_t)dy * tgtStride + (uint64_t)dx * 4, tgtStride,\n'
+     '\t\t\t    src + s->offset + (uint64_t)sy * s->bytesPerRow + (uint64_t)sx * 4,\n'
+     '\t\t\t    s->bytesPerRow, (uint64_t)w * 4, h);\n',
+     '\t\t\tif (sweet_fb_stage != 0) {\n'
+     '\t\t\t\t/* single-threaded: the helper pool belongs to the presenter */\n'
+     '\t\t\t\tstruct sweet_fb_copy_job snap = {\n'
+     '\t\t\t\t\tpanel + (uint64_t)dy * tgtStride + (uint64_t)dx * 4,\n'
+     '\t\t\t\t\tsrc + s->offset + (uint64_t)sy * s->bytesPerRow + (uint64_t)sx * 4,\n'
+     '\t\t\t\t\ttgtStride, s->bytesPerRow, (uint64_t)w * 4, h };\n'
+     '\t\t\t\tsweet_fb_copy_rows(&snap);\n'
+     '\t\t\t} else {\n'
+     '\t\t\t\tsweet_fb_copy(panel + (uint64_t)dy * tgtStride + (uint64_t)dx * 4, tgtStride,\n'
+     '\t\t\t\t    src + s->offset + (uint64_t)sy * s->bytesPerRow + (uint64_t)sx * 4,\n'
+     '\t\t\t\t    s->bytesPerRow, (uint64_t)w * 4, h);\n'
+     '\t\t\t}\n', 1),
+    ('\tif (sweet_fb_stage != 0) {\n'
+     '\t\tsweet_fb_stage_pending = true;\n'
+     '\t\tIOLockWakeup(fPresentLock, &sweet_fb_stage_pending, false);\n'
+     '\t}\n',
+     '\tif (slot >= 0) {\n'
+     '\t\tIOLockLock(sweet_fb_stage_lock);\n'
+     '\t\tsweet_fb_ready = slot;\n'
+     '\t\tIOLockWakeup(sweet_fb_stage_lock, &sweet_fb_ready, false);\n'
+     '\t\tIOLockUnlock(sweet_fb_stage_lock);\n'
+     '\t}\n', 1),
+])
+
 # Clock per core: K2c ran all eight cores, but nobody knows the Mongoose
 # clock (CMU_CPUCL0 was never readable with the cluster off). Each core
 # counts PMCCNTR cycles over 10 ms of the 26 MHz timebase in initCPU;

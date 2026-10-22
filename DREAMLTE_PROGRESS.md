@@ -415,6 +415,16 @@ eight cores. A long run has not been done yet.
   Transparency/Motion) is optional and not applied: the user has not chosen.
 - Kernel 56a0dba: `sweetfb_scale=1` (with `sweetfb_native=0`) renders
   1125x2436 and the presenter scales it to 1367x2960 (36 px bars); run p7.
+- **p7** (root without the four daemons, `sweetfb_native=0 sweetfb_scale=1`):
+  no locationd/bluetoothd/fairplayd/WirelessRadioManager churn, almost no
+  crashes; new churn: `lskdd` started 391 times (on-demand Mach service of
+  AppleKeyServices, exits at once) and `nanotimekitcompaniond` 51 (Apple
+  Watch faces). Scaled stage 1125x2436: snapshot 2.4 ms, but the presenter's
+  scale took 15.5 ms holding fPresentLock (so SwapEnd waited for it) and
+  wrote 4-byte pixels into write-combined memory; peak still ~33 frames/s.
+- Kernel step 4: two stage buffers under their own lock (no waiting on the
+  presenter), single-threaded snapshot (pool belongs to the presenter),
+  scaled rows built in cached memory then copied. Run p8.
 
 ## Open work
 

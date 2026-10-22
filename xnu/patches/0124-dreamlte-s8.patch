@@ -1080,7 +1080,7 @@ index 55d0057..a3a4a0a 100644
  	int32_t rc = sweet_psci_cpu_on(cpu->phys_id, entry, getCPUNumber());
  	IOLog(CPU_PORT_NAME " CPU: cpu=%u PSCI CPU_ON rc=%d\n", getCPUNumber(), rc);
 diff --git iokit/Kernel/arm/SweetFramebuffer.cpp iokit/Kernel/arm/SweetFramebuffer.cpp
-index 356ff51..2a3e31d 100644
+index 356ff51..aeb4007 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -48,6 +48,7 @@ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
@@ -1142,7 +1142,7 @@ index 356ff51..2a3e31d 100644
  	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
  
  	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
-@@ -302,6 +316,219 @@ get32(const uint8_t *p, uint32_t off)
+@@ -302,6 +316,235 @@ get32(const uint8_t *p, uint32_t off)
  	return v;
  }
  
@@ -1187,7 +1187,9 @@ index 356ff51..2a3e31d 100644
 +	int32_t rows;
 +	int kind;        /* 0 copy rows, 1 scale output rows y0.. */
 +	int32_t y0;
++	uint32_t *row;   /* scale: cached row of sweet_fb_out_w pixels */
 +};
++static uint32_t *sweet_fb_rowbufs[4];
 +
 +/* Scaled presentation (sweetfb_scale=1): stage (logical size) -> panel. */
 +static bool sweet_fb_scaled;
@@ -1197,17 +1199,17 @@ index 356ff51..2a3e31d 100644
 +static void
 +sweet_fb_scale_rows(const struct sweet_fb_copy_job *j)
 +{
++	int32_t built = -1;      /* stage row now in j->row */
 +	for (int32_t y = j->y0; y < j->y0 + j->rows; y++) {
 +		uint32_t *out = (uint32_t *)(j->dst + (uint64_t)y * j->dstride) + sweet_fb_out_x0;
-+		if (y > j->y0 && sweet_fb_ymap[y] == sweet_fb_ymap[y - 1]) {
-+			memcpy(out, (const uint32_t *)(j->dst + (uint64_t)(y - 1) * j->dstride) + sweet_fb_out_x0,
-+			    (size_t)sweet_fb_out_w * 4);
-+			continue;
++		if (sweet_fb_ymap[y] != built) {
++			const uint32_t *in = (const uint32_t *)(j->src + (uint64_t)sweet_fb_ymap[y] * j->sstride);
++			for (uint32_t x = 0; x < sweet_fb_out_w; x++) {
++				j->row[x] = in[sweet_fb_xmap[x]];
++			}
++			built = sweet_fb_ymap[y];
 +		}
-+		const uint32_t *in = (const uint32_t *)(j->src + (uint64_t)sweet_fb_ymap[y] * j->sstride);
-+		for (uint32_t x = 0; x < sweet_fb_out_w; x++) {
-+			out[x] = in[sweet_fb_xmap[x]];
-+		}
++		memcpy(out, j->row, (size_t)sweet_fb_out_w * 4);
 +	}
 +}
 +static struct sweet_fb_copy_job sweet_fb_jobs[SWEET_FB_COPY_HELPERS];
@@ -1255,7 +1257,8 @@ index 356ff51..2a3e31d 100644
 +sweet_fb_scale(uintptr_t dst, uint64_t dstride, uintptr_t src, uint64_t sstride, int32_t rows)
 +{
 +	if (sweet_fb_copy_lock == NULL) {
-+		struct sweet_fb_copy_job all = { dst, src, dstride, sstride, 0, rows, 1, 0 };
++		struct sweet_fb_copy_job all = { dst, src, dstride, sstride, 0, rows, 1, 0,
++			sweet_fb_rowbufs[0] };
 +		sweet_fb_scale_rows(&all);
 +		return;
 +	}
@@ -1264,13 +1267,14 @@ index 356ff51..2a3e31d 100644
 +	IOLockLock(sweet_fb_copy_lock);
 +	for (int32_t i = 0; i < SWEET_FB_COPY_HELPERS; i++, at += per) {
 +		sweet_fb_jobs[i] = (struct sweet_fb_copy_job){
-+			dst, src, dstride, sstride, 0, per, 1, at };
++			dst, src, dstride, sstride, 0, per, 1, at, sweet_fb_rowbufs[i] };
 +	}
 +	sweet_fb_copy_left = SWEET_FB_COPY_HELPERS;
 +	sweet_fb_copy_gen++;
 +	IOLockWakeup(sweet_fb_copy_lock, &sweet_fb_copy_gen, false);
 +	IOLockUnlock(sweet_fb_copy_lock);
-+	struct sweet_fb_copy_job mine = { dst, src, dstride, sstride, 0, rows - at, 1, at };
++	struct sweet_fb_copy_job mine = { dst, src, dstride, sstride, 0, rows - at, 1, at,
++		sweet_fb_rowbufs[SWEET_FB_COPY_HELPERS] };
 +	sweet_fb_copy_rows(&mine);
 +	IOLockLock(sweet_fb_copy_lock);
 +	while (sweet_fb_copy_left != 0) {
@@ -1328,22 +1332,32 @@ index 356ff51..2a3e31d 100644
 +static int32_t sweet_fb_rows;
 +static bool sweet_fb_stage_pending;
 +static uint32_t sweet_fb_stage_w, sweet_fb_stage_h;
++static IOLock *sweet_fb_stage_lock;      /* only around the indices below */
++static uintptr_t sweet_fb_stages[2];
++static int sweet_fb_ready = -1, sweet_fb_busy = -1;
 +static uint64_t sweet_fb_panel_ticks, sweet_fb_panel_copies;
 +
 +static void
 +sweet_fb_presenter(void *arg __unused, wait_result_t wr __unused)
 +{
 +	for (;;) {
-+		IOLockLock(sweet_fb_present_lock);
-+		while (!sweet_fb_stage_pending) {
-+			IOLockSleep(sweet_fb_present_lock, &sweet_fb_stage_pending, THREAD_UNINT);
++		IOLockLock(sweet_fb_stage_lock);
++		while (sweet_fb_ready < 0) {
++			IOLockSleep(sweet_fb_stage_lock, &sweet_fb_ready, THREAD_UNINT);
 +		}
-+		IOLockUnlock(sweet_fb_present_lock);
++		IOLockUnlock(sweet_fb_stage_lock);
 +		uint64_t t0 = mach_absolute_time();
 +		sweet_fb_wait_frame_done();
 +		uint64_t t1 = mach_absolute_time();
-+		IOLockLock(sweet_fb_present_lock);
-+		sweet_fb_stage_pending = false;
++		IOLockLock(sweet_fb_stage_lock);
++		int b = sweet_fb_ready;
++		sweet_fb_ready = -1;
++		sweet_fb_busy = b;
++		IOLockUnlock(sweet_fb_stage_lock);
++		if (b < 0) {
++			continue;
++		}
++		sweet_fb_stage = sweet_fb_stages[b];
 +		if (sweet_fb_scaled) {
 +			sweet_fb_scale(sweet_fb_panel, sweet_fb_stride, sweet_fb_stage,
 +			    (uint64_t)sweet_fb_stage_w * 4, sweet_fb_rows);
@@ -1351,7 +1365,9 @@ index 356ff51..2a3e31d 100644
 +			sweet_fb_copy(sweet_fb_panel, sweet_fb_stride, sweet_fb_stage, sweet_fb_stride,
 +			    sweet_fb_stride, sweet_fb_rows);
 +		}
-+		IOLockUnlock(sweet_fb_present_lock);
++		IOLockLock(sweet_fb_stage_lock);
++		sweet_fb_busy = -1;
++		IOLockUnlock(sweet_fb_stage_lock);
 +		sweet_fb_wait_ticks += t1 - t0;
 +		sweet_fb_panel_ticks += mach_absolute_time() - t1;
 +		sweet_fb_panel_copies++;
@@ -1362,7 +1378,7 @@ index 356ff51..2a3e31d 100644
  static uint32_t sweet_fb_swaps_logged;
  static uint64_t sweet_fb_swap_count;
  
-@@ -318,7 +545,16 @@ AppleCLCD::swap(const uint8_t *rec)
+@@ -318,7 +561,16 @@ AppleCLCD::swap(const uint8_t *rec)
  	IOLockLock(fLock);
  	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
  	fDirty = true;
@@ -1379,7 +1395,7 @@ index 356ff51..2a3e31d 100644
  	if ((++sweet_fb_swap_count % 1000) == 0) {
  		IOLog("SWEET FB: %llu swaps\n", sweet_fb_swap_count);
  	}
-@@ -328,6 +564,71 @@ void
+@@ -328,6 +580,98 @@ void
  AppleCLCD::present(const uint8_t *rec)
  {
  	uint32_t mask = get32(rec, 0x104);
@@ -1400,14 +1416,28 @@ index 356ff51..2a3e31d 100644
 +		uint64_t stage_bytes = sweet_fb_scaled ? (uint64_t)fLogicalW * 4 * fLogicalH :
 +		    (uint64_t)fRowBytes * fHeight;
 +		uintptr_t stage = (uintptr_t)IOMallocData((vm_size_t)stage_bytes);
++		uintptr_t stage2 = stage ? (uintptr_t)IOMallocData((vm_size_t)stage_bytes) : 0;
++		sweet_fb_stage_lock = IOLockAlloc();
++		if (stage2 == 0 || sweet_fb_stage_lock == NULL) {
++			if (stage != 0) {
++				IOFreeData((void *)stage, (vm_size_t)stage_bytes);
++			}
++			stage = 0;
++		}
 +		if (sweet_fb_scaled && stage != 0) {
 +			sweet_fb_out_w = fLogicalW * fHeight / fLogicalH;
 +			sweet_fb_out_x0 = (fWidth - sweet_fb_out_w) / 2;
 +			sweet_fb_xmap = (uint16_t *)IOMallocData(sweet_fb_out_w * sizeof(uint16_t));
 +			sweet_fb_ymap = (uint16_t *)IOMallocData(fHeight * sizeof(uint16_t));
-+			if (sweet_fb_xmap == NULL || sweet_fb_ymap == NULL) {
++			bool rows_ok = true;
++			for (int i = 0; i <= SWEET_FB_COPY_HELPERS; i++) {
++				sweet_fb_rowbufs[i] = (uint32_t *)IOMallocData(sweet_fb_out_w * 4);
++				rows_ok = rows_ok && sweet_fb_rowbufs[i] != NULL;
++			}
++			if (sweet_fb_xmap == NULL || sweet_fb_ymap == NULL || !rows_ok) {
 +				sweet_fb_scaled = false;      /* (stage too small then: drop it) */
 +				IOFreeData((void *)stage, (vm_size_t)stage_bytes);
++				IOFreeData((void *)stage2, (vm_size_t)stage_bytes);
 +				stage = 0;
 +			} else {
 +				for (uint32_t x = 0; x < sweet_fb_out_w; x++) {
@@ -1419,6 +1449,7 @@ index 356ff51..2a3e31d 100644
 +					sweet_fb_ymap[y] = (uint16_t)(sy < fLogicalH ? sy : fLogicalH - 1);
 +				}
 +				bzero((void *)stage, (size_t)stage_bytes);
++				bzero((void *)stage2, (size_t)stage_bytes);
 +				for (uint32_t y = 0; y < fHeight; y++) {  /* black side bars */
 +					bzero((void *)(fPixels + (uint64_t)y * fRowBytes), (size_t)fRowBytes);
 +				}
@@ -1428,7 +1459,10 @@ index 356ff51..2a3e31d 100644
 +		if (stage != 0) {
 +			if (!sweet_fb_scaled) {
 +				sweet_fb_copy(stage, fRowBytes, fPixels, fRowBytes, fRowBytes, (int32_t)fHeight);
++				sweet_fb_copy(stage2, fRowBytes, fPixels, fRowBytes, fRowBytes, (int32_t)fHeight);
 +			}
++			sweet_fb_stages[0] = stage;
++			sweet_fb_stages[1] = stage2;
 +			if (kernel_thread_start(sweet_fb_presenter, NULL, &t) == KERN_SUCCESS) {
 +				thread_deallocate(t);
 +				sweet_fb_stage = stage;
@@ -1438,7 +1472,16 @@ index 356ff51..2a3e31d 100644
 +		}
 +	}
 +	/* No stage (allocation failed): the old synchronous path. */
-+	uintptr_t panel = sweet_fb_stage != 0 ? sweet_fb_stage : fPixels;
++	int slot = -1;
++	if (sweet_fb_stage != 0) {
++		IOLockLock(sweet_fb_stage_lock);
++		slot = sweet_fb_busy == 0 ? 1 : (sweet_fb_busy == 1 ? 0 : (sweet_fb_ready == 0 ? 1 : 0));
++		if (sweet_fb_ready == slot) {
++			sweet_fb_ready = -1;        /* replaced by this newer frame */
++		}
++		IOLockUnlock(sweet_fb_stage_lock);
++	}
++	uintptr_t panel = slot >= 0 ? sweet_fb_stages[slot] : fPixels;
 +	bool logical = sweet_fb_stage != 0 && sweet_fb_scaled;
 +	int32_t offX = logical ? 0 : fOffX, offY = logical ? 0 : fOffY;
 +	int32_t tgtW = logical ? (int32_t)sweet_fb_stage_w : (int32_t)fWidth;
@@ -1451,7 +1494,7 @@ index 356ff51..2a3e31d 100644
  
  
  	if (!fConsolePaused) {
-@@ -380,8 +681,13 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -380,8 +724,13 @@ AppleCLCD::present(const uint8_t *rec)
  			dx = dy = 0;
  		}
  		/* Logical (presented) display coordinates -> panel coordinates. */
@@ -1465,7 +1508,7 @@ index 356ff51..2a3e31d 100644
  		if (dx < 0) {
  			sx -= dx;
  			w += dx;
-@@ -398,12 +704,21 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -398,12 +747,21 @@ AppleCLCD::present(const uint8_t *rec)
  		if (h > (int32_t)s->height - sy) {
  			h = (int32_t)s->height - sy;
  		}
@@ -1487,14 +1530,23 @@ index 356ff51..2a3e31d 100644
  		uint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow +
  		    (uint64_t)(sx + w) * 4;
  		if (w <= 0 || h <= 0 || s->elementWidth != 1 || s->elementHeight != 1 ||
-@@ -411,14 +726,38 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -411,14 +769,49 @@ AppleCLCD::present(const uint8_t *rec)
  			src = 0;
  		}
  		if (src != 0 && bpe == 4) {
 +#if defined(DREAMLTE)
-+			sweet_fb_copy(panel + (uint64_t)dy * tgtStride + (uint64_t)dx * 4, tgtStride,
-+			    src + s->offset + (uint64_t)sy * s->bytesPerRow + (uint64_t)sx * 4,
-+			    s->bytesPerRow, (uint64_t)w * 4, h);
++			if (sweet_fb_stage != 0) {
++				/* single-threaded: the helper pool belongs to the presenter */
++				struct sweet_fb_copy_job snap = {
++					panel + (uint64_t)dy * tgtStride + (uint64_t)dx * 4,
++					src + s->offset + (uint64_t)sy * s->bytesPerRow + (uint64_t)sx * 4,
++					tgtStride, s->bytesPerRow, (uint64_t)w * 4, h };
++				sweet_fb_copy_rows(&snap);
++			} else {
++				sweet_fb_copy(panel + (uint64_t)dy * tgtStride + (uint64_t)dx * 4, tgtStride,
++				    src + s->offset + (uint64_t)sy * s->bytesPerRow + (uint64_t)sx * 4,
++				    s->bytesPerRow, (uint64_t)w * 4, h);
++			}
 +#else
  			for (int32_t y = 0; y < h; y++) {
  				memcpy((void *)(fPixels + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4),
@@ -1507,9 +1559,11 @@ index 356ff51..2a3e31d 100644
  	}
 +#if defined(DREAMLTE)
 +	sweet_fb_copy_ticks += mach_absolute_time() - t_copy;
-+	if (sweet_fb_stage != 0) {
-+		sweet_fb_stage_pending = true;
-+		IOLockWakeup(fPresentLock, &sweet_fb_stage_pending, false);
++	if (slot >= 0) {
++		IOLockLock(sweet_fb_stage_lock);
++		sweet_fb_ready = slot;
++		IOLockWakeup(sweet_fb_stage_lock, &sweet_fb_ready, false);
++		IOLockUnlock(sweet_fb_stage_lock);
 +	}
 +	if ((++sweet_fb_presents % 100) == 0) {
 +		uint64_t n = sweet_fb_panel_copies ? sweet_fb_panel_copies : 1;
