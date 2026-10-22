@@ -385,6 +385,18 @@ eight cores. A long run has not been done yet.
 - Next kernel: present() only snapshots into a kernel staging buffer
   (render thread ~3 ms); a presenter thread waits for frame-done and copies
   the stage to the panel.
+- p4: staged present ran, but touch's "enable sequence failed" also stopped
+  the scripted swipes (fixed: retries, swipes start first).
+- **p5** (staged present): render-thread cost per frame 3.5-4.9 ms (was ~13
+  ms); the presenter waits 8-9 ms and copies 3 ms off that thread. The user
+  used the phone at ~250-480 s (unlocked, opened Settings): "too laggy".
+  That period had <100 frames presented. The log shows why the CPU was busy:
+  in 14 min locationd crashed 106 times, WirelessRadioManagerd 45 times,
+  bluetoothd and fairplayd.H2 were started ~80 times each, and ReportCrash
+  handled every crash. Kernel boot-arg `s8noexec=` now refuses to exec named
+  processes; `s8autoreset` does a clean shutdown (`reboot_kernel`: sync,
+  unmount, so the HFS+ journal is empty) before resetting into TWRP, with a
+  30 s direct-reset fallback.
 
 ## Open work
 

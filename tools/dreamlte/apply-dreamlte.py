@@ -218,6 +218,7 @@ edit('pexpert/arm/pe_serial.c', [
      'extern int (*PE_halt_restart)(unsigned int type);\n'
      'static volatile uint32_t *s8_pmu;\n'
      'static uint32_t s8_panic_to_recovery;\n'
+     'uint32_t s8_restart_to_recovery;          /* set by s8autoreset */\n'
      '\n'
      'static int\n'
      's8_halt_restart(unsigned int type)\n'
@@ -235,7 +236,7 @@ edit('pexpert/arm/pe_serial.c', [
      '\t\tfor (;;) {\n'
      '\t\t}\n'
      '\t}\n'
-     '\tuint32_t reason = (type != 1 && s8_panic_to_recovery) ?\n'
+     '\tuint32_t reason = (s8_restart_to_recovery || (type != 1 && s8_panic_to_recovery)) ?\n'
      '\t    0x12345674u : 0x12345670u;     /* REASON_RECOVERY / UNKNOWN */\n'
      '\ts8_pmu[0x808 / 4] = 0x12345678u;     /* INFORM2: SEC_POWER_RESET */\n'
      '\ts8_pmu[0x80c / 4] = reason;          /* INFORM3 */\n'
@@ -959,6 +960,56 @@ edit('iokit/Kernel/arm/SweetFramebuffer.cpp', [
      '\t\tsweet_fb_panel_copies = 0;\n', 1),
 ])
 
+# Run p5: in 14 minutes locationd crashed 106 times, WirelessRadioManagerd
+# 45, bluetoothd and fairplayd.H2 were started ~80 times each (no GPS, radio,
+# Bluetooth or FairPlay hardware), and ReportCrash processed every crash,
+# all competing with the UI the user was trying to use. Boot-arg
+# s8noexec=a,b,... refuses to exec those process names (launchd then retries
+# rarely, without dyld, a crash or a report). Reversible: drop the boot-arg.
+edit('bsd/kern/kern_exec.c', [
+    ('static int exec_activate_image(struct image_params *imgp);\n',
+     'static int exec_activate_image(struct image_params *imgp);\n'
+     '#if defined(ARM64_BOARD_CONFIG_A5XELTE)\n'
+     'static int\n'
+     's8_exec_denied(const char *name)\n'
+     '{\n'
+     '\tstatic char list[256];\n'
+     '\tstatic int state;       /* 0 unparsed, 1 no list, 2 list */\n'
+     '\n'
+     '\tif (state == 0) {\n'
+     '\t\tstate = (PE_parse_boot_argn("s8noexec", list, sizeof(list)) && list[0]) ? 2 : 1;\n'
+     '\t}\n'
+     '\tif (state != 2) {\n'
+     '\t\treturn 0;\n'
+     '\t}\n'
+     '\tsize_t n = strlen(name);\n'
+     '\tfor (const char *t = list; *t;) {\n'
+     '\t\tconst char *e = strchr(t, \',\');\n'
+     '\t\tsize_t tl = e ? (size_t)(e - t) : strlen(t);\n'
+     '\t\tif (tl == n && strncmp(t, name, n) == 0) {\n'
+     '\t\t\treturn 1;\n'
+     '\t\t}\n'
+     '\t\tif (e == NULL) {\n'
+     '\t\t\tbreak;\n'
+     '\t\t}\n'
+     '\t\tt = e + 1;\n'
+     '\t}\n'
+     '\treturn 0;\n'
+     '}\n'
+     '#endif\n', 1),
+    ('\t\t\t/* A short line keeps the persistent console ring useful. */\n'
+     '\t\t\tprintf("exec %s\\n", p->p_name);\n',
+     '\t\t\t/* A short line keeps the persistent console ring useful. */\n'
+     '#if defined(ARM64_BOARD_CONFIG_A5XELTE)\n'
+     '\t\t\tif (s8_exec_denied(p->p_name)) {\n'
+     '\t\t\t\tprintf("exec %s denied (s8noexec)\\n", p->p_name);\n'
+     '\t\t\t\terror = EPERM;\n'
+     '\t\t\t\tgoto done;\n'
+     '\t\t\t}\n'
+     '#endif\n'
+     '\t\t\tprintf("exec %s\\n", p->p_name);\n', 1),
+])
+
 # Clock per core: K2c ran all eight cores, but nobody knows the Mongoose
 # clock (CMU_CPUCL0 was never readable with the cluster off). Each core
 # counts PMCCNTR cycles over 10 ms of the 26 MHz timebase in initCPU;
@@ -1034,7 +1085,9 @@ edit('osfmk/arm64/machine_routines.c', [
 # PMU SWRESET. Off unless the boot-arg is given.
 edit('bsd/dev/sweet_ufs.c', [
     ('static void\nsweet_log_start(void)\n{\n',
-     'static uint32_t s8_autoreset_secs;\n'
+     'static uint32_t s8_autoreset_secs, s8_autoreset_direct;\n'
+     'extern uint32_t s8_restart_to_recovery;   /* pexpert/arm/pe_serial.c */\n'
+     'extern int reboot_kernel(int howto, char *message);\n'
      '\n'
      'static void\n'
      's8_autoreset_thread(__unused void *arg, __unused wait_result_t wr)\n'
@@ -1045,6 +1098,23 @@ edit('bsd/dev/sweet_ufs.c', [
      '\tprintf("S8 AUTORESET: %u s, resetting to recovery after the log flush\\n",\n'
      '\t    s8_autoreset_secs);\n'
      '\t(void)tsleep(&chan, PZERO, "s8reset", 3 * hz);\n'
+     '\t/* Clean shutdown (sync, unmount: the HFS+ journal stays empty, so\n'
+     '\t * the root can be edited offline), then s8_halt_restart resets into\n'
+     '\t * recovery. This thread is the fallback if that never finishes. */\n'
+     '\tif (!s8_autoreset_direct) {\n'
+     '\t\tthread_t fallback;\n'
+     '\t\ts8_autoreset_direct = 1;\n'
+     '\t\tif (kernel_thread_start(s8_autoreset_thread, NULL, &fallback) == KERN_SUCCESS) {\n'
+     '\t\t\tthread_deallocate(fallback);\n'
+     '\t\t}\n'
+     '\t\ts8_restart_to_recovery = 1;\n'
+     '\t\t(void)reboot_kernel(0, (char *)"s8autoreset");\n'
+     '\t\tfor (;;) {\n'
+     '\t\t\t(void)tsleep(&chan, PZERO, "s8reset", hz);\n'
+     '\t\t}\n'
+     '\t}\n'
+     '\t(void)tsleep(&chan, PZERO, "s8reset", 30 * hz);\n'
+     '\tprintf("S8 AUTORESET: clean shutdown did not finish, resetting directly\\n");\n'
      '\tvolatile uint32_t *pmu = (volatile uint32_t *)ml_io_map(0x16480000, 0x1000);\n'
      '\tpmu[0x808 / 4] = 0x12345678;       /* INFORM2: SEC_POWER_RESET */\n'
      '\tpmu[0x80c / 4] = 0x12345674;       /* INFORM3: REASON_RECOVERY */\n'

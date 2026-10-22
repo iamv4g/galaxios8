@@ -265,10 +265,12 @@ dreamlte_battery_read(unsigned *percent, unsigned *mv, int *ma,
  * Test input for unattended smoothness measurements: boot-arg s8swipe=N
  * plays a scripted gesture every N seconds with a sixth finger (id 4)
  * through the same HID path as the panel, starting s8swipe_start seconds
- * (default 300) after the touch driver: every 20th turn (from the first)
- * presses Home to wake the screen and swipes up to unlock (run p2: iOS had
- * turned the idle lock screen off, so swipes alone drew nothing), the
- * others are home-screen page swipes left and right. Off by default.
+ * (default 300) after the touch driver: the first turn presses Home to wake
+ * the screen and swipes up to unlock (run p2: iOS had turned the idle lock
+ * screen off, so swipes alone drew nothing); the others are home-screen page
+ * swipes left and right, which keep the display awake. (Run p3 pressed Home
+ * again every 20 turns; after the first repeat the frame rate collapsed.)
+ * Off by default.
  */
 extern uint64_t mach_absolute_time(void);
 extern void sweet_hid_key(int key, int down);  /* 3 = Home (Menu) */
@@ -294,7 +296,7 @@ s8ts_script_thread(void *arg, wait_result_t result)
 	}
 	for (unsigned n = 0;; n++) {
 		printf("S8 SWIPE: %u at %llu s\n", n, mach_absolute_time() / 26000000ULL);
-		if (n % 20 == 0) {
+		if (n == 0) {
 			sweet_hid_key(3, 1);                 /* Home: wake the display */
 			s8ts_wait(100);
 			sweet_hid_key(3, 0);

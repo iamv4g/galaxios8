@@ -81,7 +81,7 @@ index 3ba2fd4..dcbd143 100644
  		return;
  	}
 diff --git bsd/dev/a5xelte_touch.c bsd/dev/a5xelte_touch.c
-index 7ba309b..c5ef7d4 100644
+index 7ba309b..9d9897b 100644
 --- a/bsd/dev/a5xelte_touch.c
 +++ b/bsd/dev/a5xelte_touch.c
 @@ -12,6 +12,7 @@
@@ -92,7 +92,7 @@ index 7ba309b..c5ef7d4 100644
  
  extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
  extern void thread_terminate_self(void);
-@@ -615,10 +616,385 @@ a5touch_start_early(vm_offset_t nfc, vm_offset_t alive)
+@@ -615,10 +616,387 @@ a5touch_start_early(vm_offset_t nfc, vm_offset_t alive)
  	}
  }
  
@@ -363,10 +363,12 @@ index 7ba309b..c5ef7d4 100644
 + * Test input for unattended smoothness measurements: boot-arg s8swipe=N
 + * plays a scripted gesture every N seconds with a sixth finger (id 4)
 + * through the same HID path as the panel, starting s8swipe_start seconds
-+ * (default 300) after the touch driver: every 20th turn (from the first)
-+ * presses Home to wake the screen and swipes up to unlock (run p2: iOS had
-+ * turned the idle lock screen off, so swipes alone drew nothing), the
-+ * others are home-screen page swipes left and right. Off by default.
++ * (default 300) after the touch driver: the first turn presses Home to wake
++ * the screen and swipes up to unlock (run p2: iOS had turned the idle lock
++ * screen off, so swipes alone drew nothing); the others are home-screen page
++ * swipes left and right, which keep the display awake. (Run p3 pressed Home
++ * again every 20 turns; after the first repeat the frame rate collapsed.)
++ * Off by default.
 + */
 +extern uint64_t mach_absolute_time(void);
 +extern void sweet_hid_key(int key, int down);  /* 3 = Home (Menu) */
@@ -392,7 +394,7 @@ index 7ba309b..c5ef7d4 100644
 +	}
 +	for (unsigned n = 0;; n++) {
 +		printf("S8 SWIPE: %u at %llu s\n", n, mach_absolute_time() / 26000000ULL);
-+		if (n % 20 == 0) {
++		if (n == 0) {
 +			sweet_hid_key(3, 1);                 /* Home: wake the display */
 +			s8ts_wait(100);
 +			sweet_hid_key(3, 0);
@@ -490,7 +492,7 @@ index 1b57aeb..f42f892 100644
   * SWEET process sampler: where is a daemon stuck?
   *
 diff --git bsd/dev/sweet_ufs.c bsd/dev/sweet_ufs.c
-index 6b926fe..4a27e8a 100644
+index 6b926fe..b778e7d 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -18,7 +18,7 @@
@@ -674,11 +676,13 @@ index 6b926fe..4a27e8a 100644
  	return 0;
  }
  
-@@ -786,9 +851,37 @@ sweet_log_thread(__unused void *arg, __unused wait_result_t wr)
+@@ -786,9 +851,56 @@ sweet_log_thread(__unused void *arg, __unused wait_result_t wr)
  	}
  }
  
-+static uint32_t s8_autoreset_secs;
++static uint32_t s8_autoreset_secs, s8_autoreset_direct;
++extern uint32_t s8_restart_to_recovery;   /* pexpert/arm/pe_serial.c */
++extern int reboot_kernel(int howto, char *message);
 +
 +static void
 +s8_autoreset_thread(__unused void *arg, __unused wait_result_t wr)
@@ -689,6 +693,23 @@ index 6b926fe..4a27e8a 100644
 +	printf("S8 AUTORESET: %u s, resetting to recovery after the log flush\n",
 +	    s8_autoreset_secs);
 +	(void)tsleep(&chan, PZERO, "s8reset", 3 * hz);
++	/* Clean shutdown (sync, unmount: the HFS+ journal stays empty, so
++	 * the root can be edited offline), then s8_halt_restart resets into
++	 * recovery. This thread is the fallback if that never finishes. */
++	if (!s8_autoreset_direct) {
++		thread_t fallback;
++		s8_autoreset_direct = 1;
++		if (kernel_thread_start(s8_autoreset_thread, NULL, &fallback) == KERN_SUCCESS) {
++			thread_deallocate(fallback);
++		}
++		s8_restart_to_recovery = 1;
++		(void)reboot_kernel(0, (char *)"s8autoreset");
++		for (;;) {
++			(void)tsleep(&chan, PZERO, "s8reset", hz);
++		}
++	}
++	(void)tsleep(&chan, PZERO, "s8reset", 30 * hz);
++	printf("S8 AUTORESET: clean shutdown did not finish, resetting directly\n");
 +	volatile uint32_t *pmu = (volatile uint32_t *)ml_io_map(0x16480000, 0x1000);
 +	pmu[0x808 / 4] = 0x12345678;       /* INFORM2: SEC_POWER_RESET */
 +	pmu[0x80c / 4] = 0x12345674;       /* INFORM3: REASON_RECOVERY */
@@ -712,6 +733,59 @@ index 6b926fe..4a27e8a 100644
  	uint32_t on = 1;
  	thread_t thread;
  
+diff --git bsd/kern/kern_exec.c bsd/kern/kern_exec.c
+index deccec2..8919441 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -368,6 +368,34 @@ struct exec_port_actions {
+ 
+ struct image_params;    /* Forward */
+ static int exec_activate_image(struct image_params *imgp);
++#if defined(ARM64_BOARD_CONFIG_A5XELTE)
++static int
++s8_exec_denied(const char *name)
++{
++	static char list[256];
++	static int state;       /* 0 unparsed, 1 no list, 2 list */
++
++	if (state == 0) {
++		state = (PE_parse_boot_argn("s8noexec", list, sizeof(list)) && list[0]) ? 2 : 1;
++	}
++	if (state != 2) {
++		return 0;
++	}
++	size_t n = strlen(name);
++	for (const char *t = list; *t;) {
++		const char *e = strchr(t, ',');
++		size_t tl = e ? (size_t)(e - t) : strlen(t);
++		if (tl == n && strncmp(t, name, n) == 0) {
++			return 1;
++		}
++		if (e == NULL) {
++			break;
++		}
++		t = e + 1;
++	}
++	return 0;
++}
++#endif
+ static int exec_copyout_strings(struct image_params *imgp, user_addr_t *stackp);
+ static int load_return_to_errno(load_return_t lrtn);
+ static int execargs_alloc(struct image_params *imgp);
+@@ -7413,6 +7441,13 @@ process_signature(proc_t p, struct image_params *imgp)
+ 			}
+ #if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+ 			/* A short line keeps the persistent console ring useful. */
++#if defined(ARM64_BOARD_CONFIG_A5XELTE)
++			if (s8_exec_denied(p->p_name)) {
++				printf("exec %s denied (s8noexec)\n", p->p_name);
++				error = EPERM;
++				goto done;
++			}
++#endif
+ 			printf("exec %s\n", p->p_name);
+ #else
+ 			printf("Allowing spawn of iOS binary %s since it has "
 diff --git iokit/Kernel/IOPlatformExpert.cpp iokit/Kernel/IOPlatformExpert.cpp
 index 7a32a23..13e62e5 100644
 --- a/iokit/Kernel/IOPlatformExpert.cpp
@@ -1710,10 +1784,10 @@ index d3f8767..0207f32 100644
  	a5_gic_write32(a5_gicc_base, 0x008, 0);    /* GICC_BPR */
  	a5_gic_write32(a5_gicc_base, 0x000,
 diff --git pexpert/arm/pe_serial.c pexpert/arm/pe_serial.c
-index ed7dccd..95c39df 100644
+index ed7dccd..c3b9238 100644
 --- a/pexpert/arm/pe_serial.c
 +++ b/pexpert/arm/pe_serial.c
-@@ -721,6 +721,113 @@ static volatile uint32_t *fbcon_base;
+@@ -721,6 +721,114 @@ static volatile uint32_t *fbcon_base;
  static uint32_t fbcon_width, fbcon_height, fbcon_stride;
  static uint32_t fbcon_cols, fbcon_rows, fbcon_col, fbcon_row;
  
@@ -1721,6 +1795,7 @@ index ed7dccd..95c39df 100644
 +extern int (*PE_halt_restart)(unsigned int type);
 +static volatile uint32_t *s8_pmu;
 +static uint32_t s8_panic_to_recovery;
++uint32_t s8_restart_to_recovery;          /* set by s8autoreset */
 +
 +static int
 +s8_halt_restart(unsigned int type)
@@ -1738,7 +1813,7 @@ index ed7dccd..95c39df 100644
 +		for (;;) {
 +		}
 +	}
-+	uint32_t reason = (type != 1 && s8_panic_to_recovery) ?
++	uint32_t reason = (s8_restart_to_recovery || (type != 1 && s8_panic_to_recovery)) ?
 +	    0x12345674u : 0x12345670u;     /* REASON_RECOVERY / UNKNOWN */
 +	s8_pmu[0x808 / 4] = 0x12345678u;     /* INFORM2: SEC_POWER_RESET */
 +	s8_pmu[0x80c / 4] = reason;          /* INFORM3 */
@@ -1827,7 +1902,7 @@ index ed7dccd..95c39df 100644
  static void
  fbcon_clear_row(uint32_t row)
  {
-@@ -761,6 +868,9 @@ fbcon_transmit_ready(void)
+@@ -761,6 +869,9 @@ fbcon_transmit_ready(void)
  static void
  fbcon_transmit_data(uint8_t c)
  {
@@ -1837,7 +1912,7 @@ index ed7dccd..95c39df 100644
  	if (c == '\r') {
  		fbcon_col = 0;
  		return;
-@@ -840,6 +950,9 @@ fbcon_probe(void)
+@@ -840,6 +951,9 @@ fbcon_probe(void)
  	}
  	sweet_early_mark(17, "fbcon config read; mapping");
  	fbcon_base = (volatile uint32_t *)ml_io_map_wcomb(reg[0], reg[1]);
