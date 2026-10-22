@@ -608,11 +608,15 @@ edit('bsd/dev/a5xelte_touch.c', [
      '#if defined(DREAMLTE)\n\tdreamlte_touch_start();   /* the A5 path below stays off */\n#endif\n', 1),
 ])
 
-# Secondary CPUs. Loader probe (boot 19): PSCI CPU_ON alone never starts an
-# S8 core; after the PMU power-up that Samsung's kernel does itself
-# (drivers/soc/samsung/exynos-pmu.c: CPUn_CONFIGURATION |= LOCAL_PWR_CFG 0xF)
-# the A53 at MPIDR 0x101 started. The Mongoose cluster also needs its
-# cluster power (L2/non-CPU), not done yet: use cpus<=4 (the A53 cluster).
+# Secondary CPUs. Boots 19-21 started the A53s with a PMU power edge
+# (CPUn_CONFIGURATION 0 -> 0xF around PSCI CPU_ON) and a low trampoline; the
+# Mongoose cluster never came up that way. galaxios8 boot m8 (loader E2) found
+# the cause: S-Boot leaves the GIC distributor disabled (GICD_CTLR = 0) and
+# sets CPUn_OPTION = 0x10a, whose bit 8 (ENABLE_AUTO_WAKEUP_INT_REQ) makes the
+# PMU power a core (and its cluster) up on a GIC wake request. With GICD
+# enabled, plain PSCI CPU_ON starts both 0x101 and Mongoose 0x000, as in
+# TWRP's Linux. The firmware keeps the CPU_ON entry in a 32-bit PMU INFORM
+# register, so the low trampoline stays.
 edit('iokit/Kernel/arm/SweetCPU.cpp', [
     ('#include <pexpert/pexpert.h>\n',
      '#include <pexpert/pexpert.h>\n'
@@ -624,54 +628,66 @@ edit('iokit/Kernel/arm/SweetCPU.cpp', [
     ('\t__builtin_arm_dsb(DSB_SY);\n\tint32_t rc = sweet_psci_cpu_on(cpu->phys_id, entry, getCPUNumber());\n',
      '#if defined(DREAMLTE)\n'
      '\t{\n'
-     '\t\t/*\n'
-     '\t\t * The entry is in the high RAM bank (0x88xxxxxxx); the loader probe\n'
-     '\t\t * that started a core used a low entry. Exynos firmware keeps the\n'
-     '\t\t * CPU_ON entry in a 32-bit PMU INFORM register, so give it a\n'
-     '\t\t * trampoline in the unused low bank: ldr x1, 8; br x1; .quad entry.\n'
-     '\t\t */\n'
-     '\t\tstatic vm_offset_t tramp;\n'
+     '\t\t/* ldr x1, 8; br x1; .quad entry, in the unused low bank */\n'
+     '\t\tstatic vm_offset_t tramp, gicd;\n'
      '\t\tconst uint64_t tramp_pa = 0x8f000000ULL;\n'
      '\t\tif (tramp == 0) {\n'
      '\t\t\ttramp = ml_io_map(tramp_pa, 0x1000);\n'
+     '\t\t\tgicd = ml_io_map(0x10201000, 0x1000);\n'
      '\t\t}\n'
      '\t\tvolatile uint32_t *t = (volatile uint32_t *)tramp;\n'
      '\t\tt[0] = 0x58000041;              /* ldr x1, #8 */\n'
      '\t\tt[1] = 0xd61f0020;              /* br x1 */\n'
      '\t\tt[2] = (uint32_t)entry;\n'
      '\t\tt[3] = (uint32_t)((uint64_t)entry >> 32);\n'
+     '\t\tvolatile uint32_t *ctlr = (volatile uint32_t *)gicd;\n'
+     '\t\tuint32_t was = *ctlr;\n'
+     '\t\t*ctlr = was | 1;                /* GICD_CTLR: PMU auto wakeup */\n'
      '\t\t__builtin_arm_dsb(DSB_SY);\n'
-     '\t\tIOLog(CPU_PORT_NAME " CPU: cpu=%u entry 0x%llx via low trampoline 0x%llx\\n",\n'
-     '\t\t    getCPUNumber(), (uint64_t)entry, tramp_pa);\n'
+     '\t\tIOLog(CPU_PORT_NAME " CPU: cpu=%u mpidr=0x%llx entry 0x%llx via 0x%llx, GICD_CTLR 0x%x\\n",\n'
+     '\t\t    getCPUNumber(), (uint64_t)cpu->phys_id, (uint64_t)entry, tramp_pa, was);\n'
      '\t\tentry = (vm_offset_t)tramp_pa;\n'
-     '\t\tstatic vm_offset_t pmu;\n'
-     '\t\tif (pmu == 0) {\n'
-     '\t\t\tpmu = ml_io_map(0x16480000, 0x10000);\n'
-     '\t\t}\n'
-     '\t\tuint32_t off = 0x2000 + (uint32_t)(((((cpu->phys_id >> 8) & 0xf) << 2) |\n'
-     '\t\t    (cpu->phys_id & 0xf)) * 0x80);\n'
-     '\t\tvolatile uint32_t *cfg = (volatile uint32_t *)(pmu + off);\n'
-     '\t\t/*\n'
-     '\t\t * The sequence that started a core in the loader probe: PSCI\n'
-     '\t\t * CPU_ON, then a PMU power-up (LOCAL_PWR_CFG 0 -> 0xF), then CPU_ON\n'
-     '\t\t * again (below). Boot 20 skipped the 0 -> 0xF edge (cfg was left\n'
-     '\t\t * at 0xF) and the core never came alive, so power it down first.\n'
-     '\t\t */\n'
-     '\t\tcfg[0] &= ~0xfu;\n'
-     '\t\tfor (int i = 0; i < 10000 && (cfg[1] & 0xf) != 0; i++) {\n'
-     '\t\t\tIODelay(1);\n'
-     '\t\t}\n'
-     '\t\t__builtin_arm_dsb(DSB_SY);\n'
-     '\t\tint32_t rc0 = sweet_psci_cpu_on(cpu->phys_id, entry, getCPUNumber());\n'
-     '\t\tcfg[0] |= 0xf;                  /* CPUn_CONFIGURATION: LOCAL_PWR_CFG */\n'
-     '\t\tfor (int i = 0; i < 10000 && (cfg[1] & 0xf) != 0xf; i++) {\n'
-     '\t\t\tIODelay(1);\n'
-     '\t\t}\n'
-     '\t\tIOLog(CPU_PORT_NAME " CPU: cpu=%u first CPU_ON rc=%d, PMU power-up cfg=0x%x status=0x%x\\n",\n'
-     '\t\t    getCPUNumber(), rc0, cfg[0], cfg[1]);\n'
      '\t}\n'
      '#endif\n'
      '\t__builtin_arm_dsb(DSB_SY);\n\tint32_t rc = sweet_psci_cpu_on(cpu->phys_id, entry, getCPUNumber());\n', 1),
+])
+
+# Test cycles without anyone at the phone: s8autoreset=N makes the kernel
+# reset straight into TWRP N seconds after the UFS log starts, after giving
+# the log thread time to flush (it writes once a second). Same registers as
+# Samsung's sec_reboot.c: INFORM2 = POWER_RESET, INFORM3 = REASON_RECOVERY,
+# PMU SWRESET. Off unless the boot-arg is given.
+edit('bsd/dev/sweet_ufs.c', [
+    ('static void\nsweet_log_start(void)\n{\n',
+     'static uint32_t s8_autoreset_secs;\n'
+     '\n'
+     'static void\n'
+     's8_autoreset_thread(__unused void *arg, __unused wait_result_t wr)\n'
+     '{\n'
+     '\tint chan;\n'
+     '\n'
+     '\t(void)tsleep(&chan, PZERO, "s8reset", (int)s8_autoreset_secs * hz);\n'
+     '\tprintf("S8 AUTORESET: %u s, resetting to recovery after the log flush\\n",\n'
+     '\t    s8_autoreset_secs);\n'
+     '\t(void)tsleep(&chan, PZERO, "s8reset", 3 * hz);\n'
+     '\tvolatile uint32_t *pmu = (volatile uint32_t *)ml_io_map(0x16480000, 0x1000);\n'
+     '\tpmu[0x808 / 4] = 0x12345678;       /* INFORM2: SEC_POWER_RESET */\n'
+     '\tpmu[0x80c / 4] = 0x12345674;       /* INFORM3: REASON_RECOVERY */\n'
+     '\t__asm__ volatile ("dsb sy" ::: "memory");\n'
+     '\tpmu[0x400 / 4] = 1;                /* SWRESET */\n'
+     '\tfor (;;) {\n'
+     '\t\t(void)tsleep(&chan, PZERO, "s8reset", hz);\n'
+     '\t}\n'
+     '}\n'
+     '\n'
+     'static void\nsweet_log_start(void)\n{\n'
+     '\tthread_t reset_thread;\n'
+     '\n'
+     '\tif (PE_parse_boot_argn("s8autoreset", &s8_autoreset_secs, sizeof(s8_autoreset_secs)) &&\n'
+     '\t    s8_autoreset_secs != 0 &&\n'
+     '\t    kernel_thread_start(s8_autoreset_thread, NULL, &reset_thread) == KERN_SUCCESS) {\n'
+     '\t\tthread_deallocate(reset_thread);\n'
+     '\t}\n', 1),
 ])
 
 edit('bsd/dev/a5xelte_keys.c', [

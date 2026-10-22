@@ -422,7 +422,7 @@ index 1b57aeb..f42f892 100644
   * SWEET process sampler: where is a daemon stuck?
   *
 diff --git bsd/dev/sweet_ufs.c bsd/dev/sweet_ufs.c
-index 6b926fe..e70a4ce 100644
+index 6b926fe..4a27e8a 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -18,7 +18,7 @@
@@ -606,6 +606,44 @@ index 6b926fe..e70a4ce 100644
  	return 0;
  }
  
+@@ -786,9 +851,37 @@ sweet_log_thread(__unused void *arg, __unused wait_result_t wr)
+ 	}
+ }
+ 
++static uint32_t s8_autoreset_secs;
++
++static void
++s8_autoreset_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	int chan;
++
++	(void)tsleep(&chan, PZERO, "s8reset", (int)s8_autoreset_secs * hz);
++	printf("S8 AUTORESET: %u s, resetting to recovery after the log flush\n",
++	    s8_autoreset_secs);
++	(void)tsleep(&chan, PZERO, "s8reset", 3 * hz);
++	volatile uint32_t *pmu = (volatile uint32_t *)ml_io_map(0x16480000, 0x1000);
++	pmu[0x808 / 4] = 0x12345678;       /* INFORM2: SEC_POWER_RESET */
++	pmu[0x80c / 4] = 0x12345674;       /* INFORM3: REASON_RECOVERY */
++	__asm__ volatile ("dsb sy" ::: "memory");
++	pmu[0x400 / 4] = 1;                /* SWRESET */
++	for (;;) {
++		(void)tsleep(&chan, PZERO, "s8reset", hz);
++	}
++}
++
+ static void
+ sweet_log_start(void)
+ {
++	thread_t reset_thread;
++
++	if (PE_parse_boot_argn("s8autoreset", &s8_autoreset_secs, sizeof(s8_autoreset_secs)) &&
++	    s8_autoreset_secs != 0 &&
++	    kernel_thread_start(s8_autoreset_thread, NULL, &reset_thread) == KERN_SUCCESS) {
++		thread_deallocate(reset_thread);
++	}
+ 	uint32_t on = 1;
+ 	thread_t thread;
+ 
 diff --git iokit/Kernel/IOPlatformExpert.cpp iokit/Kernel/IOPlatformExpert.cpp
 index 7a32a23..13e62e5 100644
 --- a/iokit/Kernel/IOPlatformExpert.cpp
@@ -753,7 +791,7 @@ index 9969739..0535b28 100644
  	poll();
  	if (fReal) {
 diff --git iokit/Kernel/arm/SweetCPU.cpp iokit/Kernel/arm/SweetCPU.cpp
-index 55d0057..5bd24a7 100644
+index 55d0057..85a50ac 100644
 --- a/iokit/Kernel/arm/SweetCPU.cpp
 +++ b/iokit/Kernel/arm/SweetCPU.cpp
 @@ -17,6 +17,9 @@
@@ -795,7 +833,7 @@ index 55d0057..5bd24a7 100644
  	}
  	for (unsigned int i = 0; i < topology->num_cpus; i++) {
  		SweetCPU *cpu = __atomic_load_n(&sweet_cpus[i], __ATOMIC_ACQUIRE);
-@@ -279,13 +289,62 @@ SweetCPU::startCPU(vm_offset_t start_paddr, vm_offset_t arg_paddr)
+@@ -279,13 +289,36 @@ SweetCPU::startCPU(vm_offset_t start_paddr, vm_offset_t arg_paddr)
  {
  	const ml_topology_cpu_t *cpu = &ml_get_topology_info()->cpus[getCPUNumber()];
  	/* cpu_start() passes NULL,NULL: x20/x21 are set by LowResetVectorBase. */
@@ -809,51 +847,25 @@ index 55d0057..5bd24a7 100644
  	    getCPUNumber(), cpu->phys_id, (uint64_t)entry, getCPUNumber());
 +#if defined(DREAMLTE)
 +	{
-+		/*
-+		 * The entry is in the high RAM bank (0x88xxxxxxx); the loader probe
-+		 * that started a core used a low entry. Exynos firmware keeps the
-+		 * CPU_ON entry in a 32-bit PMU INFORM register, so give it a
-+		 * trampoline in the unused low bank: ldr x1, 8; br x1; .quad entry.
-+		 */
-+		static vm_offset_t tramp;
++		/* ldr x1, 8; br x1; .quad entry, in the unused low bank */
++		static vm_offset_t tramp, gicd;
 +		const uint64_t tramp_pa = 0x8f000000ULL;
 +		if (tramp == 0) {
 +			tramp = ml_io_map(tramp_pa, 0x1000);
++			gicd = ml_io_map(0x10201000, 0x1000);
 +		}
 +		volatile uint32_t *t = (volatile uint32_t *)tramp;
 +		t[0] = 0x58000041;              /* ldr x1, #8 */
 +		t[1] = 0xd61f0020;              /* br x1 */
 +		t[2] = (uint32_t)entry;
 +		t[3] = (uint32_t)((uint64_t)entry >> 32);
++		volatile uint32_t *ctlr = (volatile uint32_t *)gicd;
++		uint32_t was = *ctlr;
++		*ctlr = was | 1;                /* GICD_CTLR: PMU auto wakeup */
 +		__builtin_arm_dsb(DSB_SY);
-+		IOLog(CPU_PORT_NAME " CPU: cpu=%u entry 0x%llx via low trampoline 0x%llx\n",
-+		    getCPUNumber(), (uint64_t)entry, tramp_pa);
++		IOLog(CPU_PORT_NAME " CPU: cpu=%u mpidr=0x%llx entry 0x%llx via 0x%llx, GICD_CTLR 0x%x\n",
++		    getCPUNumber(), (uint64_t)cpu->phys_id, (uint64_t)entry, tramp_pa, was);
 +		entry = (vm_offset_t)tramp_pa;
-+		static vm_offset_t pmu;
-+		if (pmu == 0) {
-+			pmu = ml_io_map(0x16480000, 0x10000);
-+		}
-+		uint32_t off = 0x2000 + (uint32_t)(((((cpu->phys_id >> 8) & 0xf) << 2) |
-+		    (cpu->phys_id & 0xf)) * 0x80);
-+		volatile uint32_t *cfg = (volatile uint32_t *)(pmu + off);
-+		/*
-+		 * The sequence that started a core in the loader probe: PSCI
-+		 * CPU_ON, then a PMU power-up (LOCAL_PWR_CFG 0 -> 0xF), then CPU_ON
-+		 * again (below). Boot 20 skipped the 0 -> 0xF edge (cfg was left
-+		 * at 0xF) and the core never came alive, so power it down first.
-+		 */
-+		cfg[0] &= ~0xfu;
-+		for (int i = 0; i < 10000 && (cfg[1] & 0xf) != 0; i++) {
-+			IODelay(1);
-+		}
-+		__builtin_arm_dsb(DSB_SY);
-+		int32_t rc0 = sweet_psci_cpu_on(cpu->phys_id, entry, getCPUNumber());
-+		cfg[0] |= 0xf;                  /* CPUn_CONFIGURATION: LOCAL_PWR_CFG */
-+		for (int i = 0; i < 10000 && (cfg[1] & 0xf) != 0xf; i++) {
-+			IODelay(1);
-+		}
-+		IOLog(CPU_PORT_NAME " CPU: cpu=%u first CPU_ON rc=%d, PMU power-up cfg=0x%x status=0x%x\n",
-+		    getCPUNumber(), rc0, cfg[0], cfg[1]);
 +	}
 +#endif
  	__builtin_arm_dsb(DSB_SY);

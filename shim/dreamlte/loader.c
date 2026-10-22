@@ -55,7 +55,23 @@ struct prz {
 static volatile struct prz *const prz = (volatile struct prz *)RAMOOPS_CONSOLE;
 static volatile struct prz *const prz2 = (volatile struct prz *)RAMOOPS_PMSG;
 #define PRZ_DATA_MAX	(RAMOOPS_CONSOLE_SIZE - 12)
-static uint32_t log_len, log2_len;
+/* The galaxios8 test phone's TWRP 3.4.0 has a smaller ramoops (dmesg: 0x8000
+ * at 0x92000000; record 16 KiB, pmsg 16 KiB, no console zone), so its pmsg
+ * zone is at 0x92004000. The log goes there too; the upstream TWRP's zones
+ * above are kept for the G950F. */
+#define RAMOOPS_PMSG_SMALL	0x92004000UL
+#define PRZ3_DATA_MAX		(0x4000UL - 12)
+static volatile struct prz *const prz3 = (volatile struct prz *)RAMOOPS_PMSG_SMALL;
+static uint32_t log_len, log2_len, log3_len;
+
+static void prz_put_max(volatile struct prz *z, uint32_t *len, char c, uint32_t max)
+{
+	if (*len >= max)
+		return;
+	z->data[(*len)++] = (uint8_t)c;
+	z->start = *len;
+	z->size = *len;
+}
 
 static void prz_put(volatile struct prz *z, uint32_t *len, char c)
 {
@@ -76,6 +92,7 @@ static void log_ch(char c)
 {
 	prz_put(prz, &log_len, c);
 	prz_put(prz2, &log2_len, c);
+	prz_put_max(prz3, &log3_len, c, PRZ3_DATA_MAX);
 }
 
 /* ---- screen console ---- */
@@ -293,13 +310,125 @@ static void rtc_bootarg(volatile struct boot_args *ba, uint64_t raw)
 	ba->CommandLine[at] = 0;
 }
 
+#if MNGS_DIAG
+/*
+ * Experiment build (LOADER_CFLAGS=-DMNGS_DIAG=1): run the Mongoose
+ * diagnostics and also append every value they print to the boot-args as
+ * " mngs=v.v.v...". launchd logs the boot-args, and its log lands in the
+ * kernel log ring on USERDATA, which survives the forced reboot back to TWRP
+ * (the pmsg copy of the loader log does not). The first value is INFORM3 at
+ * loader entry: Samsung's sec_reboot.c writes the reset reason there, which
+ * tells whether a reset straight into recovery could be used later.
+ */
+static char mngs_rec[300];
+static int mngs_len;
+
+static void kv_rec(const char *k, uint64_t v)
+{
+	kv(k, v);
+	char num[17];
+	int n = 0;
+	do {
+		num[n++] = "0123456789abcdef"[v & 0xf];
+		v >>= 4;
+	} while (v && n < 16);
+	if (mngs_len + n + 1 >= (int)sizeof(mngs_rec))
+		return;
+	if (mngs_len)
+		mngs_rec[mngs_len++] = '.';
+	while (n)
+		mngs_rec[mngs_len++] = num[--n];
+}
+
+/*
+ * After the diagnostics the loader resets straight into recovery, the way
+ * Samsung's sec_reboot.c does (INFORM2 = POWER_RESET, INFORM3 =
+ * RESET_REASON_RECOVERY, PMU SWRESET); the results are then read from TWRP
+ * without anyone at the phone. TWRP's kernel uses sec_reboot (kallsyms), and
+ * S-Boot consumes INFORM3 (the loader always reads 0). Loop guard: if the
+ * pmsg zone still ends with our reset line, the last reset did not reach
+ * TWRP (whose ramoops would have taken over the zone), so boot XNU instead.
+ */
+#define PMU_INFORM2		0x16480808UL
+#define PMU_INFORM3		0x1648080cUL
+#define PMU_SWRESET		0x16480400UL
+static const char reset_line[] = "MNGS: reset to recovery\n";
+static int last_reset_failed;
+
+static int ends_with_reset(volatile struct prz *z, uint32_t max)
+{
+	uint32_t n = z->size, k = sizeof(reset_line) - 1;
+	if (z->sig != PRZ_SIG || n < k || n > max)
+		return 0;
+	for (uint32_t i = 0; i < k; i++)
+		if (z->data[n - k + i] != (uint8_t)reset_line[i])
+			return 0;
+	return 1;
+}
+
+static void check_last_reset(void)
+{
+	last_reset_failed = ends_with_reset(prz3, PRZ3_DATA_MAX);
+}
+
+/* The reset line must end the small zone even when the log filled it. */
+static void put_reset_line(void)
+{
+	uint32_t k = sizeof(reset_line) - 1;
+	if (log3_len + k > PRZ3_DATA_MAX)
+		log3_len = PRZ3_DATA_MAX - k;
+	out(reset_line);
+}
+
+static void mngs_cycle(volatile struct boot_args *ba)
+{
+	kv_rec("INFORM3", *(volatile uint32_t *)PMU_INFORM3);
+	kv_rec("last reset failed", (uint64_t)last_reset_failed);
+	out("\n");
+	mngs_diag(kv_rec, out);
+	int at = 0;
+	while (at < BOOT_LINE_LENGTH && ba->CommandLine[at])
+		at++;
+	const char *key = " mngs=";
+	if (at + 6 + mngs_len >= BOOT_LINE_LENGTH) {
+		out("MNGS: boot-args full, result not passed\n");
+	} else {
+		for (int i = 0; key[i]; i++)
+			ba->CommandLine[at++] = key[i];
+		for (int i = 0; i < mngs_len; i++)
+			ba->CommandLine[at++] = mngs_rec[i];
+		ba->CommandLine[at] = 0;
+	}
+	if (last_reset_failed) {
+		out("MNGS: last reset did not reach recovery, booting XNU\n");
+		return;
+	}
+	put_reset_line();
+	clean(RAMOOPS_PMSG_SMALL, RAMOOPS_PMSG_SMALL + 0x4000);
+	clean(RAMOOPS_CONSOLE, RAMOOPS_CONSOLE + RAMOOPS_CONSOLE_SIZE);
+	clean(RAMOOPS_PMSG, RAMOOPS_PMSG + RAMOOPS_CONSOLE_SIZE);
+	__asm__ volatile("dsb sy");
+	*(volatile uint32_t *)PMU_INFORM2 = 0x12345678U;	/* SEC_POWER_RESET */
+	*(volatile uint32_t *)PMU_INFORM3 = 0x12345674U;	/* REASON_RECOVERY */
+	__asm__ volatile("dsb sy");
+	*(volatile uint32_t *)PMU_SWRESET = 1;
+	for (;;)
+		__asm__ volatile("wfe");
+}
+#endif
+
 uint64_t dl_main(uintptr_t dtb, uint64_t el, uint64_t sctlr)
 {
 	*(volatile uint32_t *)DECON_TRIG = DECON_TRIG_UNMASK;
+#if MNGS_DIAG
+	check_last_reset();
+#endif
 	prz->sig = PRZ_SIG;
 	prz->start = prz->size = 0;
 	prz2->sig = PRZ_SIG;
 	prz2->start = prz2->size = 0;
+	prz3->sig = PRZ_SIG;
+	prz3->start = prz3->size = 0;
 	fill(0, 0, FB_W, FB_H, 0xff000000U);
 	fg = 0xffffff00U;
 	out("S8LOADER BEGIN  (ios-s8 dreamlte XNU loader)\n");
@@ -308,6 +437,9 @@ uint64_t dl_main(uintptr_t dtb, uint64_t el, uint64_t sctlr)
 	kv("SCTLR", sctlr);
 	kv("DTB", dtb);
 	out("\n");
+#if MNGS_DIAG
+	psci_early(kv_rec, out);
+#endif
 	if (el != 1)
 		return fail("not entered at EL1");
 
@@ -414,13 +546,19 @@ uint64_t dl_main(uintptr_t dtb, uint64_t el, uint64_t sctlr)
 	touch_probe(kv, out);
 	battery_probe(kv, out);
 	display_probe(kv, out);
+#if MNGS_DIAG
+	mngs_cycle(ba);
+	clean(ba_pa, ba_pa + PAGE_SIZE);
+#else
 	mngs_probe(kv, out);
+#endif
 	/* smp_probe(kv, out) proved the PMU power-up (boot 19); it leaves the
 	 * probed cores' PMU power on, which hid the 0 -> 0xF edge XNU needs. */
 	(void)smp_probe;
 	fg = 0xff40ff40U;
 	out("\nJUMP TO XNU\n");
 	reserve_marker();
+	clean(RAMOOPS_PMSG_SMALL, RAMOOPS_PMSG_SMALL + 0x4000);
 	clean(RAMOOPS_CONSOLE, RAMOOPS_CONSOLE + RAMOOPS_CONSOLE_SIZE);
 	clean(RAMOOPS_PMSG, RAMOOPS_PMSG + RAMOOPS_CONSOLE_SIZE);
 	return entry_pa;

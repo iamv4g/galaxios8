@@ -105,6 +105,17 @@ static void cpu_freq(void)
 	kv("cpu MHz", (c1 - c0) / 10000);
 }
 
+/* S2MPS17 PMIC register read for other probes (after pmic_init). */
+int pmic_read(unsigned reg)
+{
+	return speedy(SLAVE_PMIC, reg, 0, 0);
+}
+
+int pmic_write(unsigned reg, uint8_t val)
+{
+	return speedy(SLAVE_PMIC, reg, 1, val);
+}
+
 uint64_t pmic_init(void (*kv_fn)(const char *, uint64_t), void (*out_fn)(const char *))
 {
 	kv = kv_fn;

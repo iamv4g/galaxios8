@@ -18,6 +18,8 @@ READELF=${CROSS}readelf
 sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi; }
 filesize() { wc -c < "$1" | tr -d ' '; }
 CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -fno-tree-loop-distribute-patterns -march=armv8-a -Wall -Wextra -Werror"
+# Extra defines, e.g. LOADER_CFLAGS=-DMNGS_DIAG=1 for the Mongoose experiment build.
+CFLAGS="$CFLAGS ${LOADER_CFLAGS:-}"
 mkdir -p out
 $CC $CFLAGS -c start.S -o out/start.o
 $CC $CFLAGS -c loader.c -o out/loader.o

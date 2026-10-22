@@ -233,6 +233,37 @@ Observed on the test phone used for this fork (serial not recorded):
   pieces (BindFS lookups for Pearl/FactoryData, usermanagerd personas, logd
   privilege denied by the sandbox stand-in); no panic in the log.
 
+## Mongoose cluster: root cause found (2026-10-22, boots m1-m8)
+
+Loader experiment build `LOADER_CFLAGS=-DMNGS_DIAG=1` (smp_probe.c
+`mngs_diag`, `psci_early`): results go to the boot-args (`mngs=`) and to pmsg;
+the loader then resets straight into TWRP (INFORM2 0x12345678, INFORM3
+0x12345674, PMU SWRESET, as Samsung's sec_reboot.c), so a test cycle needs
+nobody at the phone. This TWRP's ramoops is 32 KiB at 0x92000000 with the
+pmsg zone at 0x92004000 (the upstream TWRP used 2 MiB, pmsg 0x92180000); the
+loader now writes both.
+
+- m2/m3/m5/m6 (PMU only): the Mongoose cluster sequencer stayed at 0x60000,
+  NONCPU/L2 off although their configurations already read on (0xf000f /
+  0x7); `cluster0_on`, NONCPU/L2 writes and 0 -> on edges changed nothing. A
+  core edge powered core 0x000 (status 0xf) but it never ran. S2MPS17 BUCK2
+  (vdd_cpucl0) is on (ctrl 0x78, ~675 mV), so not the rail.
+- m7 (E1): plain PSCI CPU_ON as the first thing in the loader starts neither
+  0x101 nor 0x000: the loader's probes are not the cause.
+- TWRP's Samsung 4.4 kernel boots all 8 cores with plain PSCI 0.1 in 0.3 s.
+  S-Boot (LUN sdb, read to the git-ignored research/sboot/) sets
+  CPUn_OPTION = 0x10a for the Mongoose cores before the kernel (file offset
+  0x74f1c); bit 8 = ENABLE_AUTO_WAKEUP_INT_REQ (Samsung S5E8890-syspwr.c).
+- **m8 (E2): with GICD_CTLR set to 1 (S-Boot leaves it 0), plain PSCI CPU_ON
+  started A53 0x101 and Mongoose 0x000; the cluster sequencer went to 1.** No
+  PMU writes and no SGI were needed. The PMU powers cores and clusters on a
+  GIC wake request, which needs the distributor enabled.
+- Patch 0124 now: DREAMLTE SweetCPU sets GICD_CTLR bit 0 and does a single
+  CPU_ON through the low trampoline (no PMU power edge); new boot-arg
+  `s8autoreset=N` resets the kernel into TWRP N s after the UFS log starts
+  (after a log flush), for unattended kernel test cycles. Not yet built or
+  booted.
+
 ## Open work
 
 1. Boot the latest kernel/loader: does the frame-done copy remove the tearing,
