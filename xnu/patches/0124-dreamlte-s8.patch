@@ -81,7 +81,7 @@ index 3ba2fd4..dcbd143 100644
  		return;
  	}
 diff --git bsd/dev/a5xelte_touch.c bsd/dev/a5xelte_touch.c
-index 7ba309b..8668656 100644
+index 7ba309b..c5ef7d4 100644
 --- a/bsd/dev/a5xelte_touch.c
 +++ b/bsd/dev/a5xelte_touch.c
 @@ -12,6 +12,7 @@
@@ -92,7 +92,7 @@ index 7ba309b..8668656 100644
  
  extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
  extern void thread_terminate_self(void);
-@@ -615,10 +616,374 @@ a5touch_start_early(vm_offset_t nfc, vm_offset_t alive)
+@@ -615,10 +616,385 @@ a5touch_start_early(vm_offset_t nfc, vm_offset_t alive)
  	}
  }
  
@@ -417,6 +417,14 @@ index 7ba309b..8668656 100644
 +	int enabled = 1;
 +	(void)PE_parse_boot_argn("s8touch", &enabled, sizeof(enabled));
 +	(void)PE_parse_boot_argn("sweetfb_native", &s8ts_native, sizeof(s8ts_native));
++	/* Scripted test input does not depend on the panel answering. */
++	(void)PE_parse_boot_argn("s8swipe", &s8ts_swipe_secs, sizeof(s8ts_swipe_secs));
++	(void)PE_parse_boot_argn("s8swipe_start", &s8ts_swipe_start, sizeof(s8ts_swipe_start));
++	if (s8ts_swipe_secs != 0 &&
++	    kernel_thread_start(s8ts_script_thread, NULL, &thread) == KERN_SUCCESS) {
++		printf("S8 TOUCH: scripted swipes every %u s from %u s\n", s8ts_swipe_secs, s8ts_swipe_start);
++		thread_deallocate(thread);
++	}
 +	if (!enabled) {
 +		printf("S8 TOUCH: disabled\n");
 +		return;
@@ -437,17 +445,20 @@ index 7ba309b..8668656 100644
 +	}
 +	uint8_t func[3] = {0x30, 0x01, 0x00};                  /* TOUCH_FUNCTION = touch */
 +	uint8_t sense = 0x10;                                   /* SENSE_ON */
-+	if (!s8i2c_xfer(s8ts_i2c, S8TS_ADDR, func, 3, NULL, 0) ||
++	/* Boots g1 and p4: "enable sequence failed" once, and the phone had no
++	 * touch for the whole boot. Reset the bus and try again a few times. */
++	unsigned tries = 0;
++	while (!s8i2c_xfer(s8ts_i2c, S8TS_ADDR, func, 3, NULL, 0) ||
 +	    !s8i2c_xfer(s8ts_i2c, S8TS_ADDR, &sense, 1, NULL, 0)) {
-+		printf("S8 TOUCH: enable sequence failed\n");
-+		return;
++		if (++tries == 5) {
++			printf("S8 TOUCH: enable sequence failed %u times\n", tries);
++			return;
++		}
++		s8ts_wait(20);
++		s8i2c_reset(s8ts_i2c);
 +	}
-+	(void)PE_parse_boot_argn("s8swipe", &s8ts_swipe_secs, sizeof(s8ts_swipe_secs));
-+	(void)PE_parse_boot_argn("s8swipe_start", &s8ts_swipe_start, sizeof(s8ts_swipe_start));
-+	if (s8ts_swipe_secs != 0 &&
-+	    kernel_thread_start(s8ts_script_thread, NULL, &thread) == KERN_SUCCESS) {
-+		printf("S8 TOUCH: scripted swipes every %u s from %u s\n", s8ts_swipe_secs, s8ts_swipe_start);
-+		thread_deallocate(thread);
++	if (tries != 0) {
++		printf("S8 TOUCH: enabled after %u retries\n", tries);
 +	}
 +	if (kernel_thread_start(s8ts_thread, NULL, &thread) == KERN_SUCCESS) {
 +		thread_deallocate(thread);
