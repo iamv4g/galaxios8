@@ -276,6 +276,21 @@ loader now writes both.
   screen and a TWRP log pull. The SweetCPU topology check already expects
   MPIDR 0x0-0x3 for logical 4-7.
 
+## Handoff (2026-10-22 ~09:00)
+
+- Phone state: stopped in the K2 boot (`cpus=8`); needs a forced reboot into
+  TWRP (Power + Volume Down, then Power + Bixby + Volume Up at once).
+- Kernel from CI run 39707064974 (SHA-256 `cb949c45...53cd8`, commit
+  ffa3ee7) adds `PE_halt_restart` (restart, panic, PS_HOLD power-off) and the
+  console tail in this TWRP's pmsg zone. Not booted yet. Images built locally
+  (git-ignored): `shim/dreamlte/out/s8-k2b-boot.img` (`cpus=8
+  s8autoreset=240`: a panic now resets into TWRP with the panic in pmsg) and
+  `shim/dreamlte/out/s8-daily-boot.img` (`cpus=4`, no autoreset). Known-good
+  fallback: `s8-ios-boot.img` (SHA-256 `bfffbcba...b43a`, boot g2).
+- Next, in order: photo of the K2 screen; pull the log ring (`pull-sweetlog.sh
+  k2`); flash `s8-k2b-boot.img`, `adb reboot`, wait for TWRP, read pmsg; fix
+  XNU on the Mongoose cores from that; then the daily image.
+
 ## Open work
 
 1. Boot the latest kernel/loader: does the frame-done copy remove the tearing,
