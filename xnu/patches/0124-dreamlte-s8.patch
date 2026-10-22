@@ -1096,10 +1096,33 @@ index fbc383d..57e6096 100644
  
  	cpu_l1_tte = cpu_tte + ((va_l1 & ARM_TT_L1_INDEX_MASK) >> ARM_TT_L1_SHIFT);
 diff --git osfmk/arm64/machine_routines.c osfmk/arm64/machine_routines.c
-index c5b33bd..6d56a33 100644
+index c5b33bd..3ddcbed 100644
 --- a/osfmk/arm64/machine_routines.c
 +++ b/osfmk/arm64/machine_routines.c
-@@ -2054,7 +2054,11 @@ ml_set_decrementer(uint32_t dec_value)
+@@ -1056,8 +1056,12 @@ ml_parse_cpu_topology(void)
+ 		uint32_t phys_cluster_id = (cpu->cluster_type == CLUSTER_TYPE_P);
+ #endif
+ 		assert(phys_cluster_id <= MAX_CPU_CLUSTER_PHY_ID);
++#if defined(DREAMLTE)
++		cpu->cluster_id = 0;
++#else
+ 		cpu->cluster_id = ((cluster_phys_to_logical[phys_cluster_id] == -1) ?
+ 		    topology_info.num_clusters : cluster_phys_to_logical[phys_cluster_id]);
++#endif
+ 
+ 		assert(cpu->cluster_id < MAX_CPU_CLUSTERS);
+ 
+@@ -1099,6 +1103,9 @@ ml_parse_cpu_topology(void)
+ 		cpu->cluster_core_id = (int)ml_readprop(child, "cluster-core-id", MPIDR_CPU_ID(cpu->phys_id));
+ #endif
+ 
++#if defined(DREAMLTE)
++		cluster_phys_to_logical[phys_cluster_id] = 0;
++#endif
+ 		cluster->num_cpus++;
+ 		cluster->cpu_mask |= 1ULL << cpu->cpu_id;
+ 
+@@ -2054,7 +2061,11 @@ ml_set_decrementer(uint32_t dec_value)
  	if (cdp->cpu_set_decrementer_func) {
  		cdp->cpu_set_decrementer_func(dec_value);
  	} else {
@@ -1111,7 +1134,7 @@ index c5b33bd..6d56a33 100644
  	}
  }
  
-@@ -2182,7 +2186,11 @@ ml_get_decrementer(void)
+@@ -2182,7 +2193,11 @@ ml_get_decrementer(void)
  	} else {
  		uint64_t wide_val;
  
@@ -1123,7 +1146,7 @@ index c5b33bd..6d56a33 100644
  		dec = (uint32_t)wide_val;
  		assert(wide_val == (uint64_t)dec);
  	}
-@@ -2205,7 +2213,11 @@ ml_enable_monitor(void)
+@@ -2205,7 +2220,11 @@ ml_enable_monitor(void)
  boolean_t
  ml_get_timer_pending(void)
  {
@@ -1135,7 +1158,7 @@ index c5b33bd..6d56a33 100644
  	return ((cntv_ctl & CNTV_CTL_EL0_ISTATUS) != 0) ? TRUE : FALSE;
  }
  
-@@ -2282,9 +2294,14 @@ _enable_virtual_timer(void)
+@@ -2282,9 +2301,14 @@ _enable_virtual_timer(void)
  {
  	uint64_t cntvctl = CNTV_CTL_EL0_ENABLE; /* One wants to use 32 bits, but "mrs" prefers it this way */
  
@@ -1394,10 +1417,10 @@ index d3f8767..0207f32 100644
  	a5_gic_write32(a5_gicc_base, 0x008, 0);    /* GICC_BPR */
  	a5_gic_write32(a5_gicc_base, 0x000,
 diff --git pexpert/arm/pe_serial.c pexpert/arm/pe_serial.c
-index ed7dccd..fda5e40 100644
+index ed7dccd..95c39df 100644
 --- a/pexpert/arm/pe_serial.c
 +++ b/pexpert/arm/pe_serial.c
-@@ -721,6 +721,110 @@ static volatile uint32_t *fbcon_base;
+@@ -721,6 +721,113 @@ static volatile uint32_t *fbcon_base;
  static uint32_t fbcon_width, fbcon_height, fbcon_stride;
  static uint32_t fbcon_cols, fbcon_rows, fbcon_col, fbcon_row;
  
@@ -1410,8 +1433,11 @@ index ed7dccd..fda5e40 100644
 +s8_halt_restart(unsigned int type)
 +{
 +	/* IOPlatformExpert.h: 0 halt, 1 restart, 4 panic restart,
-+	 * 9 panic restart without callouts; other types are notifications. */
-+	if (s8_pmu == NULL || (type != 0 && type != 1 && type != 4 && type != 9)) {
++	 * 9 panic restart without callouts, 10 panic diagnostics done (sent
++	 * after the panic text, before debug.c waits for a KDP debugger over
++	 * serial, which K2b did forever); other types are notifications. */
++	if (s8_pmu == NULL ||
++	    (type != 0 && type != 1 && type != 4 && type != 9 && type != 10)) {
 +		return 0;
 +	}
 +	if (type == 0) {
@@ -1508,7 +1534,7 @@ index ed7dccd..fda5e40 100644
  static void
  fbcon_clear_row(uint32_t row)
  {
-@@ -761,6 +865,9 @@ fbcon_transmit_ready(void)
+@@ -761,6 +868,9 @@ fbcon_transmit_ready(void)
  static void
  fbcon_transmit_data(uint8_t c)
  {
@@ -1518,7 +1544,7 @@ index ed7dccd..fda5e40 100644
  	if (c == '\r') {
  		fbcon_col = 0;
  		return;
-@@ -840,6 +947,9 @@ fbcon_probe(void)
+@@ -840,6 +950,9 @@ fbcon_probe(void)
  	}
  	sweet_early_mark(17, "fbcon config read; mapping");
  	fbcon_base = (volatile uint32_t *)ml_io_map_wcomb(reg[0], reg[1]);

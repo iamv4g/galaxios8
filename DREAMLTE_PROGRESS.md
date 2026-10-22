@@ -312,6 +312,26 @@ Read in the patched tree (prep-xnu-tree.sh + 0124, Lima VM):
   ID_AA64MMFR0) against the A53's; TWRP's Linux reported no CPU feature
   variation, so they are expected to match.
 
+## K2b (2026-10-22 18:04, CI 39715410874 kernel, `cpus=8 s8autoreset=240`)
+
+First run of `tools/dreamlte/cycle.sh`: sda7 written and verified
+(`059f7447...be5ec`); the phone did not return within 480 s. Screen photo
+(user, IMG_5060): all 8 CPUs now registered (`pset_find(cluster_id=1)`
+creates pset 1 for the Mongoose cores), cpu 1 (0x101) came up and entered
+initCPU, then `panic(cpu 1 ...): Ticket lock 0xfffffff007b74888 is
+unexpectedly owned by thread ... @lock_ticket.c:143`, with repeated
+`cpu_signal failed in DebuggerXCallEnter`. The kernel is unslid, so the lock
+is `_pset0 + 0x108`, pset0's scheduler lock, taken again by its owner. It
+then printed "configuring debugging over serial / Initializing serial KDP"
+and waited for a debugger (`serial=3` + `debug=0xc`), so it never reached
+`PE_halt_restart`. The K2 log ring was still K1's: K2 had stopped before the
+log thread.
+
+Changes (0124): every core in logical cluster 0 (one scheduler pset; MPIDR
+Aff1 still indexes `cluster_offsets`), and `s8_halt_restart` also acts on
+`kPEPanicDiagnosticsDone` (10), which debug.c sends after the panic text and
+before waiting for KDP: into TWRP with `s8autoreset`, else a normal restart.
+
 ## Open work
 
 1. Boot the latest kernel/loader: does the frame-done copy remove the tearing,

@@ -223,8 +223,11 @@ edit('pexpert/arm/pe_serial.c', [
      's8_halt_restart(unsigned int type)\n'
      '{\n'
      '\t/* IOPlatformExpert.h: 0 halt, 1 restart, 4 panic restart,\n'
-     '\t * 9 panic restart without callouts; other types are notifications. */\n'
-     '\tif (s8_pmu == NULL || (type != 0 && type != 1 && type != 4 && type != 9)) {\n'
+     '\t * 9 panic restart without callouts, 10 panic diagnostics done (sent\n'
+     '\t * after the panic text, before debug.c waits for a KDP debugger over\n'
+     '\t * serial, which K2b did forever); other types are notifications. */\n'
+     '\tif (s8_pmu == NULL ||\n'
+     '\t    (type != 0 && type != 1 && type != 4 && type != 9 && type != 10)) {\n'
      '\t\treturn 0;\n'
      '\t}\n'
      '\tif (type == 0) {\n'
@@ -721,6 +724,29 @@ edit('iokit/Kernel/arm/SweetCPU.cpp', [
      '\t}\n'
      '#endif\n'
      '\t__builtin_arm_dsb(DSB_SY);\n\tint32_t rc = sweet_psci_cpu_on(cpu->phys_id, entry, getCPUNumber());\n', 1),
+])
+
+# K2b (cpus=8): with the A53 and Mongoose cores in two clusters (two
+# scheduler psets) the first secondary panicked "Ticket lock ... is
+# unexpectedly owned" on pset0's lock (pset0 + 0x108) as it came online; the
+# two-pset path was never exercised on these boards (K1, one cluster, is
+# fine). Put every core in logical cluster 0 (one pset, plain SMP
+# scheduling). The physical cluster (MPIDR Aff1) still gets its slot in
+# cluster_offsets for MPIDR-indexed per-CPU data.
+edit('osfmk/arm64/machine_routines.c', [
+    ('\t\tcpu->cluster_id = ((cluster_phys_to_logical[phys_cluster_id] == -1) ?\n'
+     '\t\t    topology_info.num_clusters : cluster_phys_to_logical[phys_cluster_id]);\n',
+     '#if defined(DREAMLTE)\n'
+     '\t\tcpu->cluster_id = 0;\n'
+     '#else\n'
+     '\t\tcpu->cluster_id = ((cluster_phys_to_logical[phys_cluster_id] == -1) ?\n'
+     '\t\t    topology_info.num_clusters : cluster_phys_to_logical[phys_cluster_id]);\n'
+     '#endif\n', 1),
+    ('\t\tcluster->num_cpus++;\n\t\tcluster->cpu_mask |= 1ULL << cpu->cpu_id;\n',
+     '#if defined(DREAMLTE)\n'
+     '\t\tcluster_phys_to_logical[phys_cluster_id] = 0;\n'
+     '#endif\n'
+     '\t\tcluster->num_cpus++;\n\t\tcluster->cpu_mask |= 1ULL << cpu->cpu_id;\n', 1),
 ])
 
 # Test cycles without anyone at the phone: s8autoreset=N makes the kernel
