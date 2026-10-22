@@ -38,6 +38,18 @@ TWRP has no `/dev/block/by-name`; use the `sdaN` names. `/sdcard` lives on USERD
 
 ## 3. Kernel
 
+### On this Mac (tested 2026-10-22)
+
+Needs Kernel Debug Kit 13.5 build 22G74 in `/Library/Developer/KDKs` (Apple's signed package; `dortania/KdkSupportPkg` mirrors it without a login: verify the SHA-256 `29866842...b7d4` from their manifest and `pkgutil --check-signature`, then `sudo installer -pkg ".../KernelDebugKit.pkg" -target /`), Homebrew `jq gum cmake ninja`, and Xcode (27.1 works; patch 0083 adds the `IORPC.kernelContent` field its `iig` emits). Then:
+
+```bash
+bash tools/dreamlte/build-xnu-local.sh     # prints the kernel path
+```
+
+It sets up blacktop/darwin-xnu-build in the git-ignored `research/xnu-local/` exactly like the CI workflow (same commit, Cortex-A53 firehose flags), resets the xnu tree, re-applies `xnu/patches` and builds. First run ~15 min, later runs ~10 min (every patched file recompiles). Checked against CI: the same 5 optional blacktop patches are skipped, the S8 code is present, and the only LSE hit is the known `K256` constant table. The kernel differs in size from CI's (Xcode 27.1 vs 15).
+
+### On GitHub Actions
+
 Run the `xnu` workflow in your fork (Actions → xnu → Run workflow, `machine_config=A5XELTE`), or:
 
 ```bash
