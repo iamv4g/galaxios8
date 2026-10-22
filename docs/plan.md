@@ -11,7 +11,7 @@ Goal: a Galaxy S8 (Exynos, SM-G950F / SM-G950N) that runs iOS 16 well enough to 
 | Boot | Lock screen in ≤ 90 s from power-on | ~15 min on 1 core (upstream); 4 cores faster, not timed |
 | UI | Home-screen swipe and app launch ≥ 30 fps, no tearing | Laggy; tearing seen in boot 31; frame-done copy untested |
 | Touch | Taps and swipes land where the finger is; ≤ 50 ms latency | Works (polled); latency not measured |
-| CPU | All 8 cores; clocks raised under thermal control | 4 A53 at ~1053 MHz; Mongoose starts in a loader test (m8) |
+| CPU | All 8 cores; clocks raised under thermal control | 8 cores (4 A53 at 1053 MHz, 4 Mongoose at ~1066 MHz), one scheduler cluster |
 | Memory | ≥ 2 GiB for XNU | 512 MiB |
 | Power | Battery % and charging correct every boot; screen off/on with the power key; brightness control | Gauge read works on some boots only; no sleep, no brightness |
 | Input | Power, volume, Home (Bixby), haptic feedback | Keys work; no haptics |
@@ -38,7 +38,7 @@ The speed of every other stream depends on how fast one hardware test cycle is.
 
 ### W1 CPU: eight cores and clocks (P0)
 
-- **Root cause found (boot m8):** S-Boot leaves the GIC distributor off; the PMU powers cores and clusters only on a GIC wake request (CPUn_OPTION bit 8). With GICD_CTLR = 1, plain PSCI CPU_ON starts A53 and Mongoose cores.
+- **Done (K2c, K2d):** all eight cores run iOS. Causes fixed: S-Boot leaves the GIC distributor off and the PMU powers cores only on a GIC wake request (CPUn_OPTION bit 8), so plain PSCI CPU_ON works once GICD_CTLR = 1; SweetCPU did not match the `samsung,mongoose-m2` nodes; two scheduler psets deadlocked on pset0's lock, so all cores share one logical cluster for now. Clocks measured: A53 1053 MHz, Mongoose ~1066 MHz.
 - **K1:** kernel with the new SweetCPU (GICD on, single CPU_ON, low trampoline), `cpus=4`: the A53s must still come up. **K2:** `cpus=8`.
 - Scheduler: describe the two clusters in the ADT (cluster-type for P and E cores) so XNU's AMP scheduler places UI threads on Mongoose.
 - Clocks: A53 runs at ~1053 MHz of 1690; Mongoose speed unknown (CMU_CPUCL0 readable once the cluster is on). Options, in order: (a) program the PLLs and the S2MPS17 bucks from Samsung's ASV/LUT tables (`cmucal-vclklut`, `vdd_mngs_*`) at a few fixed steps, from the loader; (b) load Samsung's ACPM DVFS plugin (`exynos8895_acpm_dvfs.fw`, present in S-Boot and loaded by Linux) and talk to it over ACPM IPC; (c) leave the defaults. Any of these needs the thermal sensor (TMU) read first and a hard cap.
@@ -126,7 +126,7 @@ CS47L93 codec + MAX98506 amp behind the ABOX DSP; an IOAudio/CoreAudio path woul
 
 ## 4. Next actions
 
-1. K1 passed (4 A53 cores with plain CPU_ON, unattended reset back to TWRP). K2 (`cpus=8`) stopped before the log thread: read the screen and the log, then fix XNU on the Mongoose cores (see W1 scenarios). Make panics reset into TWRP too (set INFORM3 in the panic path), so a crashing test does not need a person.
+1. Eight cores run (K2c/K2d). Next for W1: a 1 h soak on eight cores, then a proper two-cluster topology (find the pset0 lock recursion) so the scheduler can prefer the Mongoose cores, then clocks.
 2. Write `cycle.sh` once the user agrees to unattended flashing.
 3. Port the USB ECM gadget patches to the Exynos DWC3.
 4. Measure: time to lock screen and swipe fps on the current build, so later gains are numbers.

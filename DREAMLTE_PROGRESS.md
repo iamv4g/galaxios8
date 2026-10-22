@@ -346,6 +346,17 @@ Mongoose clock is unknown (S-Boot may leave CPUCL0 on the 26 MHz
 oscillator), and the scheduler now treats all eight cores alike. Next kernel
 logs each core's MHz (PMCCNTR over 10 ms in initCPU).
 
+## K2d: clocks (2026-10-22 18:51, CI 39772603639)
+
+Kernel SHA-256 `6db290f1...af982`, `cpus=8 s8autoreset=120`, by
+`cycle.sh`: A53 cpu 0-3 measure 1053 MHz (PLL 0xa0f30311), Mongoose cpu 4-7
+1065-1066 MHz. Both clusters run from their PLLs at about 1.05 GHz (max
+1690 / 2314 MHz). No panic.
+
+The phone's BOOT is now `s8-daily8-boot.img` (same kernel, `cpus=8`, no
+autoreset; SHA-256 `e48f4c4e...413c1`), so a normal reboot boots iOS on
+eight cores. A long run has not been done yet.
+
 ## Open work
 
 1. Boot the latest kernel/loader: does the frame-done copy remove the tearing,
