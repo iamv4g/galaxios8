@@ -1385,70 +1385,121 @@ index d3f8767..0207f32 100644
  	a5_gic_write32(a5_gicc_base, 0x008, 0);    /* GICC_BPR */
  	a5_gic_write32(a5_gicc_base, 0x000,
 diff --git pexpert/arm/pe_serial.c pexpert/arm/pe_serial.c
-index ed7dccd..1966bdd 100644
+index ed7dccd..fda5e40 100644
 --- a/pexpert/arm/pe_serial.c
 +++ b/pexpert/arm/pe_serial.c
-@@ -721,6 +721,59 @@ static volatile uint32_t *fbcon_base;
+@@ -721,6 +721,110 @@ static volatile uint32_t *fbcon_base;
  static uint32_t fbcon_width, fbcon_height, fbcon_stride;
  static uint32_t fbcon_cols, fbcon_rows, fbcon_col, fbcon_row;
  
 +#if defined(DREAMLTE)
++extern int (*PE_halt_restart)(unsigned int type);
++static volatile uint32_t *s8_pmu;
++static uint32_t s8_panic_to_recovery;
++
++static int
++s8_halt_restart(unsigned int type)
++{
++	/* IOPlatformExpert.h: 0 halt, 1 restart, 4 panic restart,
++	 * 9 panic restart without callouts; other types are notifications. */
++	if (s8_pmu == NULL || (type != 0 && type != 1 && type != 4 && type != 9)) {
++		return 0;
++	}
++	if (type == 0) {
++		s8_pmu[0x330c / 4] &= ~0x100u;   /* PS_HOLD low: power off */
++		for (;;) {
++		}
++	}
++	uint32_t reason = (type != 1 && s8_panic_to_recovery) ?
++	    0x12345674u : 0x12345670u;     /* REASON_RECOVERY / UNKNOWN */
++	s8_pmu[0x808 / 4] = 0x12345678u;     /* INFORM2: SEC_POWER_RESET */
++	s8_pmu[0x80c / 4] = reason;          /* INFORM3 */
++	__asm__ volatile ("dsb sy" ::: "memory");
++	s8_pmu[0x400 / 4] = 1;               /* SWRESET */
++	for (;;) {
++	}
++}
++
++static void
++s8_restart_init(void)
++{
++	uint32_t secs = 0;
++
++	s8_pmu = (volatile uint32_t *)ml_io_map(0x16480000, 0x4000);
++	s8_panic_to_recovery = PE_parse_boot_argn("s8autoreset", &secs, sizeof(secs)) && secs != 0;
++	PE_halt_restart = s8_halt_restart;
++}
++
 +/*
 + * Copy of the console in TWRP's ramoops pmsg zone, in persistent_ram
 + * format (sig "DBGC", start, size, ring data), appended to the loader's
-+ * text there. After a forced reboot TWRP shows loader + kernel log as
-+ * /sys/fs/pstore/pmsg-ramoops-0. (The dump zone survives too but this
-+ * TWRP does not expose it; the console zone header sits on RAM cells that
-+ * lose the same bits on every forced reboot.)
++ * text there; TWRP shows it as /sys/fs/pstore/pmsg-ramoops-0 after a warm
++ * reset. Two layouts: the upstream author's TWRP (2 MiB ramoops, pmsg at
++ * 0x92180000) and TWRP 3.4.0 on the galaxios8 G950N (32 KiB ramoops,
++ * 16 KiB pmsg at 0x92004000); both get the text. The small zone wraps,
++ * so it keeps the last ~16 KiB, which is where a panic ends up.
 + */
-+#define KLOG_CAP        (A5_KLOG_SIZE - 12)
-+static volatile uint32_t *klog_hdr;
-+static volatile uint8_t *klog_data;
-+static uint32_t klog_start, klog_size;
++struct klog_zone {
++	uint64_t phys, len;
++	volatile uint32_t *hdr;
++	volatile uint8_t *data;
++	uint32_t cap, start, size;
++};
++static struct klog_zone klog_zones[] = {
++	{ .phys = A5_KLOG_PHYS, .len = A5_KLOG_SIZE },
++	{ .phys = A5_KLOG2_PHYS, .len = A5_KLOG2_SIZE },
++};
 +static void klog_putc(uint8_t c);
 +
 +static void
 +klog_init(void)
 +{
-+	klog_hdr = (volatile uint32_t *)ml_io_map(A5_KLOG_PHYS, A5_KLOG_SIZE);
-+	if (klog_hdr == NULL) {
-+		return;
-+	}
-+	klog_data = (volatile uint8_t *)(klog_hdr + 3);
-+	/* Continue after the loader's text if its header is sane. */
-+	if (klog_hdr[0] == 0x43474244u && klog_hdr[1] == klog_hdr[2] &&
-+	    klog_hdr[2] < KLOG_CAP - 0x10000) {
-+		klog_start = klog_size = klog_hdr[2];
-+	} else {
-+		klog_hdr[0] = 0x43474244u;
-+		klog_start = klog_size = 0;
++	for (unsigned i = 0; i < sizeof(klog_zones) / sizeof(klog_zones[0]); i++) {
++		struct klog_zone *z = &klog_zones[i];
++		z->hdr = (volatile uint32_t *)ml_io_map(z->phys, z->len);
++		if (z->hdr == NULL) {
++			continue;
++		}
++		z->cap = (uint32_t)z->len - 12;
++		/* Continue after the loader's text if its header is sane. */
++		if (z->hdr[0] == 0x43474244u && z->hdr[1] == z->hdr[2] && z->hdr[2] < z->cap) {
++			z->start = z->size = z->hdr[2];
++		} else {
++			z->hdr[0] = 0x43474244u;
++			z->start = z->size = 0;
++		}
++		z->data = (volatile uint8_t *)(z->hdr + 3);
 +	}
 +	const char *banner = "\n--- XNU console ---\n";
 +	for (; *banner; banner++) {
 +		klog_putc((uint8_t)*banner);
 +	}
++	s8_restart_init();
 +}
 +
 +static void
 +klog_putc(uint8_t c)
 +{
-+	if (klog_data == NULL) {
-+		return;
++	for (unsigned i = 0; i < sizeof(klog_zones) / sizeof(klog_zones[0]); i++) {
++		struct klog_zone *z = &klog_zones[i];
++		if (z->data == NULL) {
++			continue;
++		}
++		z->data[z->start] = c;
++		z->start = (z->start + 1) % z->cap;
++		if (z->size < z->cap) {
++			z->size++;
++		}
++		z->hdr[1] = z->start;
++		z->hdr[2] = z->size;
 +	}
-+	klog_data[klog_start] = c;
-+	klog_start = (klog_start + 1) % KLOG_CAP;
-+	if (klog_size < KLOG_CAP) {
-+		klog_size++;
-+	}
-+	klog_hdr[1] = klog_start;
-+	klog_hdr[2] = klog_size;
 +}
 +#endif
 +
  static void
  fbcon_clear_row(uint32_t row)
  {
-@@ -761,6 +814,9 @@ fbcon_transmit_ready(void)
+@@ -761,6 +865,9 @@ fbcon_transmit_ready(void)
  static void
  fbcon_transmit_data(uint8_t c)
  {
@@ -1458,7 +1509,7 @@ index ed7dccd..1966bdd 100644
  	if (c == '\r') {
  		fbcon_col = 0;
  		return;
-@@ -840,6 +896,9 @@ fbcon_probe(void)
+@@ -840,6 +947,9 @@ fbcon_probe(void)
  	}
  	sweet_early_mark(17, "fbcon config read; mapping");
  	fbcon_base = (volatile uint32_t *)ml_io_map_wcomb(reg[0], reg[1]);
@@ -1469,10 +1520,10 @@ index ed7dccd..1966bdd 100644
  	if (fbcon_base != NULL) {
  		register_serial_functions(&sweet_fbcon_serial_functions);
 diff --git pexpert/pexpert/arm64/A5XELTE.h pexpert/pexpert/arm64/A5XELTE.h
-index e6718d4..b6f812d 100644
+index e6718d4..f6af904 100644
 --- a/pexpert/pexpert/arm64/A5XELTE.h
 +++ b/pexpert/pexpert/arm64/A5XELTE.h
-@@ -24,6 +24,43 @@
+@@ -24,6 +24,45 @@
  #define HAS_GIC_V3                    0
  #define A5XELTE_VTIMER_INTID         27
  
@@ -1494,6 +1545,8 @@ index e6718d4..b6f812d 100644
 +#define A5_TOUCH_DEFAULT              0           /* A5 ZT7538 path absent */
 +#define A5_KLOG_PHYS                  0x92180000  /* TWRP ramoops pmsg zone */
 +#define A5_KLOG_SIZE                  0x80000
++#define A5_KLOG2_PHYS                 0x92004000  /* TWRP 3.4.0 (G950N) pmsg zone */
++#define A5_KLOG2_SIZE                 0x4000
 +/* Samsung's S8 kernel DT: arch timer "use-physical-timer". The EL1
 + * virtual timer is not usable on the secondary cores (boot 22/24: 4
 + * CPUs up, then sleeping threads and workqueue threads never ran).
