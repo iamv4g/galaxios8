@@ -425,6 +425,21 @@ eight cores. A long run has not been done yet.
 - Kernel step 4: two stage buffers under their own lock (no waiting on the
   presenter), single-threaded snapshot (pool belongs to the presenter),
   scaled rows built in cached memory then copied. Run p8.
+- **p8**: CoreAnimation reached ~50 frames/s while swiping (100 presents per
+  ~2 s), first time above ~33; snapshot ~5.3 ms (single-threaded, no lock
+  wait); the panel ~42 updates/s (presenter: wait ~7.7 ms + scale ~15.3 ms).
+- **p9** (root also without lskdd and nanotimekitcompaniond: fsck clean
+  before, 5 chunks written; scale in 16.16 fixed point): no daemon churn
+  left (top exec counts 13, 10, 9), one crash (driverkitd); still ~50
+  frames/s rendered, panel ~42/s, scale 14 ms. The CPU is now saturated:
+  CoreAnimation's parallel software renderer and the presenter share it.
+- BOOT is now the daily image with everything (`s8-daily-p9-boot.img`,
+  SHA-256 `8458c151...07553`: `cpus=8 sweetfb_native=0 sweetfb_scale=1
+  sweetfb_hz=60`, no scripted swipes, no autoreset). Not yet tried by hand.
+- Next for smoothness: raise CPU clocks (A53 1053 of 1690 MHz, Mongoose ~1066
+  of 2314) with Samsung's voltage tables and a thermal check; hardware
+  scaling in the DPP instead of the CPU scale (needs eyes on the screen);
+  Reduce Transparency/Motion if the user wants it.
 
 ## Open work
 
