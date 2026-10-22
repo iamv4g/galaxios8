@@ -373,6 +373,18 @@ eight cores. A long run has not been done yet.
   pages) for unattended measurements.
 - `sweet-root-tweaks.py` now turns on Reduce Transparency and Reduce Motion
   (no CPU blurs). Not on the phone's current root: TWRP has no HFS+.
+- p2 (CI kernel `ada556dd...`, swipes every 6 s from 420 s): the idle lock
+  screen had already turned the display off, so the swipes drew nothing.
+- **p3** (local build, every 20th turn presses Home and swipes up first):
+  the display woke, **~30 frames/s while swiping** (100 presents per 3-4 s,
+  one present per swap), frame copy 3.0 ms with four threads, frame-done wait
+  9-11 ms, both on CoreAnimation's render thread. After swipe 21 the pace
+  fell to a few frames per swipe (Spotlight/splashboardd started; not seen on
+  screen). Sparse backboardd samples show CA's software renderer
+  (`CA::OGL::SW::image_sampler`, `scan_convert`).
+- Next kernel: present() only snapshots into a kernel staging buffer
+  (render thread ~3 ms); a presenter thread waits for frame-done and copies
+  the stage to the panel.
 
 ## Open work
 

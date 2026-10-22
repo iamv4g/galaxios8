@@ -864,6 +864,101 @@ edit('iokit/Kernel/arm/SweetFramebuffer.cpp', [
      '\tIOLockUnlock(fPresentLock);\n}\n', 1),
 ])
 
+# Smoothness, step 2 (run p3: during swipes ~30 frames/s, each present
+# blocked the render thread ~10 ms waiting for frame-done + ~3 ms copying).
+# present() now only snapshots the frame into a kernel staging buffer (the
+# CA surface is free again when SwapEnd returns, so no tearing from surface
+# reuse); a presenter thread waits for frame-done and copies the stage to the
+# panel. Both copies hold fPresentLock, so they never overlap.
+edit('iokit/Kernel/arm/SweetFramebuffer.cpp', [
+    ('static uint32_t sweet_fb_swaps_logged;\n',
+     '#if defined(DREAMLTE)\n'
+     'static IOLock *sweet_fb_present_lock;\n'
+     'static uintptr_t sweet_fb_stage, sweet_fb_panel;\n'
+     'static uint64_t sweet_fb_stride;\n'
+     'static int32_t sweet_fb_rows;\n'
+     'static bool sweet_fb_stage_pending;\n'
+     'static uint64_t sweet_fb_panel_ticks, sweet_fb_panel_copies;\n'
+     '\n'
+     'static void\n'
+     'sweet_fb_presenter(void *arg __unused, wait_result_t wr __unused)\n'
+     '{\n'
+     '\tfor (;;) {\n'
+     '\t\tIOLockLock(sweet_fb_present_lock);\n'
+     '\t\twhile (!sweet_fb_stage_pending) {\n'
+     '\t\t\tIOLockSleep(sweet_fb_present_lock, &sweet_fb_stage_pending, THREAD_UNINT);\n'
+     '\t\t}\n'
+     '\t\tIOLockUnlock(sweet_fb_present_lock);\n'
+     '\t\tuint64_t t0 = mach_absolute_time();\n'
+     '\t\tsweet_fb_wait_frame_done();\n'
+     '\t\tuint64_t t1 = mach_absolute_time();\n'
+     '\t\tIOLockLock(sweet_fb_present_lock);\n'
+     '\t\tsweet_fb_stage_pending = false;\n'
+     '\t\tsweet_fb_copy(sweet_fb_panel, sweet_fb_stride, sweet_fb_stage, sweet_fb_stride,\n'
+     '\t\t    sweet_fb_stride, sweet_fb_rows);\n'
+     '\t\tIOLockUnlock(sweet_fb_present_lock);\n'
+     '\t\tsweet_fb_wait_ticks += t1 - t0;\n'
+     '\t\tsweet_fb_panel_ticks += mach_absolute_time() - t1;\n'
+     '\t\tsweet_fb_panel_copies++;\n'
+     '\t}\n'
+     '}\n'
+     '#endif\n'
+     '\n'
+     'static uint32_t sweet_fb_swaps_logged;\n', 1),
+    ('#if defined(DREAMLTE)\n'
+     '\tuint64_t t_wait = mach_absolute_time();\n'
+     '\tsweet_fb_wait_frame_done();\n'
+     '\tuint64_t t_copy = mach_absolute_time();\n'
+     '\tsweet_fb_wait_ticks += t_copy - t_wait;\n'
+     '#endif\n',
+     '#if defined(DREAMLTE)\n'
+     '\tuint64_t t_copy = mach_absolute_time();\n'
+     '\tif (sweet_fb_stage == 0 && sweet_fb_present_lock == NULL) {\n'
+     '\t\tsweet_fb_present_lock = fPresentLock;\n'
+     '\t\tsweet_fb_panel = fPixels;\n'
+     '\t\tsweet_fb_stride = fRowBytes;\n'
+     '\t\tsweet_fb_rows = (int32_t)fHeight;\n'
+     '\t\tuintptr_t stage = (uintptr_t)IOMallocData((vm_size_t)(fRowBytes * fHeight));\n'
+     '\t\tthread_t t;\n'
+     '\t\tif (stage != 0) {\n'
+     '\t\t\tsweet_fb_copy(stage, fRowBytes, fPixels, fRowBytes, fRowBytes, (int32_t)fHeight);\n'
+     '\t\t\tif (kernel_thread_start(sweet_fb_presenter, NULL, &t) == KERN_SUCCESS) {\n'
+     '\t\t\t\tthread_deallocate(t);\n'
+     '\t\t\t\tsweet_fb_stage = stage;\n'
+     '\t\t\t\tIOLog("SWEET FB: staged present, %llu bytes\\n", (uint64_t)fRowBytes * fHeight);\n'
+     '\t\t\t}\n'
+     '\t\t}\n'
+     '\t}\n'
+     '\t/* No stage (allocation failed): the old synchronous path. */\n'
+     '\tuintptr_t panel = sweet_fb_stage != 0 ? sweet_fb_stage : fPixels;\n'
+     '\tif (sweet_fb_stage == 0) {\n'
+     '\t\tsweet_fb_wait_frame_done();\n'
+     '\t}\n'
+     '#endif\n', 1),
+    ('\t\t\tsweet_fb_copy(fPixels + (uint64_t)dy * fRowBytes + (uint64_t)dx * 4, fRowBytes,\n',
+     '\t\t\tsweet_fb_copy(panel + (uint64_t)dy * fRowBytes + (uint64_t)dx * 4, fRowBytes,\n', 1),
+    ('\tsweet_fb_copy_ticks += mach_absolute_time() - t_copy;\n'
+     '\tif ((++sweet_fb_presents % 100) == 0) {\n',
+     '\tsweet_fb_copy_ticks += mach_absolute_time() - t_copy;\n'
+     '\tif (sweet_fb_stage != 0) {\n'
+     '\t\tsweet_fb_stage_pending = true;\n'
+     '\t\tIOLockWakeup(fPresentLock, &sweet_fb_stage_pending, false);\n'
+     '\t}\n'
+     '\tif ((++sweet_fb_presents % 100) == 0) {\n', 1),
+    ('\t\tIOLog("SWEET FB: %llu presents at %llu s, last 100: wait %llu us, copy %llu us avg; %llu swaps\\n",\n'
+     '\t\t    sweet_fb_presents, mach_absolute_time() / 26000000ULL, sweet_fb_wait_ticks / 2600,\n'
+     '\t\t    sweet_fb_copy_ticks / 2600, sweet_fb_swap_count);\n'
+     '\t\tsweet_fb_wait_ticks = sweet_fb_copy_ticks = 0;\n',
+     '\t\tuint64_t n = sweet_fb_panel_copies ? sweet_fb_panel_copies : 1;\n'
+     '\t\tIOLog("SWEET FB: %llu presents at %llu s, last 100: snapshot %llu us avg (render thread); "\n'
+     '\t\t    "%llu panel copies, wait %llu us, copy %llu us avg; %llu swaps\\n",\n'
+     '\t\t    sweet_fb_presents, mach_absolute_time() / 26000000ULL, sweet_fb_copy_ticks / 2600,\n'
+     '\t\t    sweet_fb_panel_copies, sweet_fb_wait_ticks / 26 / n, sweet_fb_panel_ticks / 26 / n,\n'
+     '\t\t    sweet_fb_swap_count);\n'
+     '\t\tsweet_fb_wait_ticks = sweet_fb_copy_ticks = sweet_fb_panel_ticks = 0;\n'
+     '\t\tsweet_fb_panel_copies = 0;\n', 1),
+])
+
 # Clock per core: K2c ran all eight cores, but nobody knows the Mongoose
 # clock (CMU_CPUCL0 was never readable with the cluster off). Each core
 # counts PMCCNTR cycles over 10 ms of the 26 MHz timebase in initCPU;
