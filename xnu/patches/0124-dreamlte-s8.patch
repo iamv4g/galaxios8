@@ -1008,7 +1008,7 @@ index 356ff51..ec6b9da 100644
  
  bool
 diff --git iokit/KernelConfigTables.cpp iokit/KernelConfigTables.cpp
-index 9987f5a..9a35982 100644
+index 9987f5a..eeaa219 100644
 --- a/iokit/KernelConfigTables.cpp
 +++ b/iokit/KernelConfigTables.cpp
 @@ -39,7 +39,7 @@ const char * gIOKernelConfigTables =
@@ -1019,6 +1019,15 @@ index 9987f5a..9a35982 100644
 +    "     'IONameMatch'     = ('samsung,a5xelte', 'samsung,dreamlte');"
  #else
      "     'IONameMatch'     = 'xiaomi,sweet';"
+ #endif
+@@ -49,7 +49,7 @@ const char * gIOKernelConfigTables =
+     "     'IOClass'         = SweetCPU;"
+     "     'IOProviderClass' = IOPlatformDevice;"
+ #if defined(ARM64_BOARD_CONFIG_A5XELTE)
+-    "     'IONameMatch'     = 'arm,cortex-a53';"
++    "     'IONameMatch'     = ('arm,cortex-a53', 'samsung,mongoose-m2');"
+ #else
+     "     'IONameMatch'     = 'qcom,kryo470';"
  #endif
 @@ -74,7 +74,7 @@ const char * gIOKernelConfigTables =
      "     'IOClass'         = AppleCLCD;"

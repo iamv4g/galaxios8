@@ -510,6 +510,12 @@ edit('iokit/KernelConfigTables.cpp', [
      "    \"     'IONameMatch'     = ('samsung,a5xelte-display', 'samsung,dreamlte-display');\"\n", 1),
     ("    \"     'IONameMatch'     = 'samsung,a5xelte';\"\n",
      "    \"     'IONameMatch'     = ('samsung,a5xelte', 'samsung,dreamlte');\"\n", 1),
+    # K2 (cpus=8) stopped: the ADT names the Mongoose cores
+    # 'samsung,mongoose-m2' (as Samsung's DT and mainline do), SweetCPU only
+    # matched 'arm,cortex-a53', so logical 4-7 got no driver and startAll
+    # panicked with "CPU registration timeout" after 10 s.
+    ("    \"     'IONameMatch'     = 'arm,cortex-a53';\"\n",
+     "    \"     'IONameMatch'     = ('arm,cortex-a53', 'samsung,mongoose-m2');\"\n", 1),
 ])
 
 # A5 touch probe maps Exynos7580 I2C/GPIO blocks: a bus error on the S8.

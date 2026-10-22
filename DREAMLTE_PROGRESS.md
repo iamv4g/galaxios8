@@ -291,6 +291,26 @@ loader now writes both.
   k2`); flash `s8-k2b-boot.img`, `adb reboot`, wait for TWRP, read pmsg; fix
   XNU on the Mongoose cores from that; then the daily image.
 
+## K2 analysis (static, 2026-10-22)
+
+Read in the patched tree (prep-xnu-tree.sh + 0124, Lima VM):
+- **Cause of K2: SweetCPU's IOKit personality matched only
+  `'arm,cortex-a53'`.** The ADT names logical 4-7 `samsung,mongoose-m2`
+  (`tools/mkadt_dreamlte.py`), so those nubs got no driver,
+  `sweet_cpus_registered` stayed at 4, and `SweetCPU::startAll` panicked
+  "CPU registration timeout" after 10 s, before any Mongoose CPU_ON. With
+  `debug=0xc` and no `PE_halt_restart` the phone just stopped. 0124 now
+  matches `('arm,cortex-a53', 'samsung,mongoose-m2')`.
+- Checked and fine for MPIDR 0x0-0x3: `reset_vector` looks the CPU up by
+  MPIDR Aff1:Aff0 (`and x0, x15, #0xFFFF`), so 0x000 finds logical 4;
+  topology maps MPIDR Aff1 to logical clusters (A53 0, Mongoose 1); the GICv2
+  code reads each core's own ITARGETSR0 to address SGIs, so the Mongoose GIC
+  interfaces 0-3 are handled; the SweetCPU topology check expects 0x0-0x3 for
+  logical 4-7. Cosmetic: `getCPUName` says "Cortex-A53" for every core.
+- Still unverified until it runs: Mongoose ID registers (CTR_EL0, DCZID_EL0,
+  ID_AA64MMFR0) against the A53's; TWRP's Linux reported no CPU feature
+  variation, so they are expected to match.
+
 ## Open work
 
 1. Boot the latest kernel/loader: does the frame-done copy remove the tearing,
