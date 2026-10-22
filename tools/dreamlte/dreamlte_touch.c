@@ -26,6 +26,7 @@
 static vm_offset_t s8ts_i2c, s8ts_alive, s8bat_i2c;
 static int s8ts_sleep;
 static int s8ts_native;         /* sweetfb_native: iOS sees the whole panel */
+static int s8ts_scaled;         /* sweetfb_scale=1: 1125x2436 scaled to the panel height */
 static bool s8ts_down[S8TS_FINGERS];
 static uint16_t s8ts_x[S8TS_FINGERS], s8ts_y[S8TS_FINGERS];
 
@@ -134,6 +135,14 @@ s8ts_report(const uint8_t *ev)
 	if (s8ts_native) {
 		x = x * 1080 / 4096;
 		y = y * 1920 / 4096;
+	} else if (s8ts_scaled) {
+		/* 1125x2436 scaled by 2960/2436 to 1367x2960, centered (36 px bars). */
+		int px = ((int)(x * 1440 / 4096) - (1440 - 1367) / 2) * 2436 / 2960;
+		int py = (int)(y * 2436 / 4096);
+		px = px < 0 ? 0 : (px > 1124 ? 1124 : px);
+		py = py < 0 ? 0 : (py > 2435 ? 2435 : py);
+		x = (unsigned)px * 1080 / 1125;
+		y = (unsigned)py * 1920 / 2436;
 	} else {
 		/* 1125x2436 is shown centered on the 1440x2960 panel. */
 		int px = (int)(x * 1440 / 4096) - (1440 - 1125) / 2;
@@ -321,6 +330,7 @@ dreamlte_touch_start(void)
 	int enabled = 1;
 	(void)PE_parse_boot_argn("s8touch", &enabled, sizeof(enabled));
 	(void)PE_parse_boot_argn("sweetfb_native", &s8ts_native, sizeof(s8ts_native));
+	(void)PE_parse_boot_argn("sweetfb_scale", &s8ts_scaled, sizeof(s8ts_scaled));
 	/* Scripted test input does not depend on the panel answering. */
 	(void)PE_parse_boot_argn("s8swipe", &s8ts_swipe_secs, sizeof(s8ts_swipe_secs));
 	(void)PE_parse_boot_argn("s8swipe_start", &s8ts_swipe_start, sizeof(s8ts_swipe_start));

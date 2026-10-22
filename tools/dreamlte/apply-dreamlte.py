@@ -1013,6 +1013,191 @@ edit('bsd/kern/kern_exec.c', [
      '\t\t\tprintf("exec %s\\n", p->p_name);\n', 1),
 ])
 
+# Smoothness, step 3: fewer pixels for CoreAnimation. With sweetfb_native=0
+# iOS renders the iPhone X size, 1125x2436 (36 % fewer pixels than the
+# 1440x2960 panel, and the layout Apple designed); upstream showed it 1:1 in
+# the middle. Boot-arg sweetfb_scale=1 makes the stage that logical size and
+# lets the presenter thread scale it to 1367x2960, centered (uniform 1.215,
+# 36-pixel black side bars), nearest-neighbour with precomputed row/column
+# maps, on the same helper threads.
+edit('iokit/Kernel/arm/SweetFramebuffer.cpp', [
+    ('struct sweet_fb_copy_job {\n'
+     '\tuintptr_t dst, src;\n'
+     '\tuint64_t dstride, sstride, bytes;\n'
+     '\tint32_t rows;\n'
+     '};\n',
+     'struct sweet_fb_copy_job {\n'
+     '\tuintptr_t dst, src;\n'
+     '\tuint64_t dstride, sstride, bytes;\n'
+     '\tint32_t rows;\n'
+     '\tint kind;        /* 0 copy rows, 1 scale output rows y0.. */\n'
+     '\tint32_t y0;\n'
+     '};\n'
+     '\n'
+     '/* Scaled presentation (sweetfb_scale=1): stage (logical size) -> panel. */\n'
+     'static bool sweet_fb_scaled;\n'
+     'static uint16_t *sweet_fb_xmap, *sweet_fb_ymap;  /* panel -> stage x / y */\n'
+     'static uint32_t sweet_fb_out_w, sweet_fb_out_x0;\n'
+     '\n'
+     'static void\n'
+     'sweet_fb_scale_rows(const struct sweet_fb_copy_job *j)\n'
+     '{\n'
+     '\tfor (int32_t y = j->y0; y < j->y0 + j->rows; y++) {\n'
+     '\t\tuint32_t *out = (uint32_t *)(j->dst + (uint64_t)y * j->dstride) + sweet_fb_out_x0;\n'
+     '\t\tif (y > j->y0 && sweet_fb_ymap[y] == sweet_fb_ymap[y - 1]) {\n'
+     '\t\t\tmemcpy(out, (const uint32_t *)(j->dst + (uint64_t)(y - 1) * j->dstride) + sweet_fb_out_x0,\n'
+     '\t\t\t    (size_t)sweet_fb_out_w * 4);\n'
+     '\t\t\tcontinue;\n'
+     '\t\t}\n'
+     '\t\tconst uint32_t *in = (const uint32_t *)(j->src + (uint64_t)sweet_fb_ymap[y] * j->sstride);\n'
+     '\t\tfor (uint32_t x = 0; x < sweet_fb_out_w; x++) {\n'
+     '\t\t\tout[x] = in[sweet_fb_xmap[x]];\n'
+     '\t\t}\n'
+     '\t}\n'
+     '}\n', 1),
+    ('static void\n'
+     'sweet_fb_copy_rows(const struct sweet_fb_copy_job *j)\n'
+     '{\n',
+     'static void\n'
+     'sweet_fb_copy_rows(const struct sweet_fb_copy_job *j)\n'
+     '{\n'
+     '\tif (j->kind == 1) {\n'
+     '\t\tsweet_fb_scale_rows(j);\n'
+     '\t\treturn;\n'
+     '\t}\n', 1),
+    ('/* Copy rows x bytes, split over the helpers and the caller. */\n',
+     '/* Scale the stage into panel rows [0, rows), split like sweet_fb_copy. */\n'
+     'static void\n'
+     'sweet_fb_scale(uintptr_t dst, uint64_t dstride, uintptr_t src, uint64_t sstride, int32_t rows)\n'
+     '{\n'
+     '\tif (sweet_fb_copy_lock == NULL) {\n'
+     '\t\tstruct sweet_fb_copy_job all = { dst, src, dstride, sstride, 0, rows, 1, 0 };\n'
+     '\t\tsweet_fb_scale_rows(&all);\n'
+     '\t\treturn;\n'
+     '\t}\n'
+     '\tint32_t parts = SWEET_FB_COPY_HELPERS + 1;\n'
+     '\tint32_t per = rows / parts, at = 0;\n'
+     '\tIOLockLock(sweet_fb_copy_lock);\n'
+     '\tfor (int32_t i = 0; i < SWEET_FB_COPY_HELPERS; i++, at += per) {\n'
+     '\t\tsweet_fb_jobs[i] = (struct sweet_fb_copy_job){\n'
+     '\t\t\tdst, src, dstride, sstride, 0, per, 1, at };\n'
+     '\t}\n'
+     '\tsweet_fb_copy_left = SWEET_FB_COPY_HELPERS;\n'
+     '\tsweet_fb_copy_gen++;\n'
+     '\tIOLockWakeup(sweet_fb_copy_lock, &sweet_fb_copy_gen, false);\n'
+     '\tIOLockUnlock(sweet_fb_copy_lock);\n'
+     '\tstruct sweet_fb_copy_job mine = { dst, src, dstride, sstride, 0, rows - at, 1, at };\n'
+     '\tsweet_fb_copy_rows(&mine);\n'
+     '\tIOLockLock(sweet_fb_copy_lock);\n'
+     '\twhile (sweet_fb_copy_left != 0) {\n'
+     '\t\tIOLockSleep(sweet_fb_copy_lock, &sweet_fb_copy_left, THREAD_UNINT);\n'
+     '\t}\n'
+     '\tIOLockUnlock(sweet_fb_copy_lock);\n'
+     '}\n'
+     '\n'
+     '/* Copy rows x bytes, split over the helpers and the caller. */\n', 1),
+    ('\t\tsweet_fb_copy(sweet_fb_panel, sweet_fb_stride, sweet_fb_stage, sweet_fb_stride,\n'
+     '\t\t    sweet_fb_stride, sweet_fb_rows);\n',
+     '\t\tif (sweet_fb_scaled) {\n'
+     '\t\t\tsweet_fb_scale(sweet_fb_panel, sweet_fb_stride, sweet_fb_stage,\n'
+     '\t\t\t    (uint64_t)sweet_fb_stage_w * 4, sweet_fb_rows);\n'
+     '\t\t} else {\n'
+     '\t\t\tsweet_fb_copy(sweet_fb_panel, sweet_fb_stride, sweet_fb_stage, sweet_fb_stride,\n'
+     '\t\t\t    sweet_fb_stride, sweet_fb_rows);\n'
+     '\t\t}\n', 1),
+    ('static bool sweet_fb_stage_pending;\n',
+     'static bool sweet_fb_stage_pending;\n'
+     'static uint32_t sweet_fb_stage_w, sweet_fb_stage_h;\n', 1),
+    # stage set-up: logical size when scaling
+    ('\t\tuintptr_t stage = (uintptr_t)IOMallocData((vm_size_t)(fRowBytes * fHeight));\n'
+     '\t\tthread_t t;\n'
+     '\t\tif (stage != 0) {\n'
+     '\t\t\tsweet_fb_copy(stage, fRowBytes, fPixels, fRowBytes, fRowBytes, (int32_t)fHeight);\n',
+     '\t\tint scale = 0;\n'
+     '\t\tPE_parse_boot_argn("sweetfb_scale", &scale, sizeof(scale));\n'
+     '\t\tsweet_fb_scaled = scale != 0 && (fLogicalW != fWidth || fLogicalH != fHeight) &&\n'
+     '\t\t    fLogicalW <= fWidth && fLogicalH <= fHeight;\n'
+     '\t\tsweet_fb_stage_w = sweet_fb_scaled ? fLogicalW : fWidth;\n'
+     '\t\tsweet_fb_stage_h = sweet_fb_scaled ? fLogicalH : fHeight;\n'
+     '\t\tuint64_t stage_bytes = sweet_fb_scaled ? (uint64_t)fLogicalW * 4 * fLogicalH :\n'
+     '\t\t    (uint64_t)fRowBytes * fHeight;\n'
+     '\t\tuintptr_t stage = (uintptr_t)IOMallocData((vm_size_t)stage_bytes);\n'
+     '\t\tif (sweet_fb_scaled && stage != 0) {\n'
+     '\t\t\tsweet_fb_out_w = fLogicalW * fHeight / fLogicalH;\n'
+     '\t\t\tsweet_fb_out_x0 = (fWidth - sweet_fb_out_w) / 2;\n'
+     '\t\t\tsweet_fb_xmap = (uint16_t *)IOMallocData(sweet_fb_out_w * sizeof(uint16_t));\n'
+     '\t\t\tsweet_fb_ymap = (uint16_t *)IOMallocData(fHeight * sizeof(uint16_t));\n'
+     '\t\t\tif (sweet_fb_xmap == NULL || sweet_fb_ymap == NULL) {\n'
+     '\t\t\t\tsweet_fb_scaled = false;      /* (stage too small then: drop it) */\n'
+     '\t\t\t\tIOFreeData((void *)stage, (vm_size_t)stage_bytes);\n'
+     '\t\t\t\tstage = 0;\n'
+     '\t\t\t} else {\n'
+     '\t\t\t\tfor (uint32_t x = 0; x < sweet_fb_out_w; x++) {\n'
+     '\t\t\t\t\tuint32_t sx = (2 * x + 1) * fLogicalW / (2 * sweet_fb_out_w);\n'
+     '\t\t\t\t\tsweet_fb_xmap[x] = (uint16_t)(sx < fLogicalW ? sx : fLogicalW - 1);\n'
+     '\t\t\t\t}\n'
+     '\t\t\t\tfor (uint32_t y = 0; y < fHeight; y++) {\n'
+     '\t\t\t\t\tuint32_t sy = (2 * y + 1) * fLogicalH / (2 * fHeight);\n'
+     '\t\t\t\t\tsweet_fb_ymap[y] = (uint16_t)(sy < fLogicalH ? sy : fLogicalH - 1);\n'
+     '\t\t\t\t}\n'
+     '\t\t\t\tbzero((void *)stage, (size_t)stage_bytes);\n'
+     '\t\t\t\tfor (uint32_t y = 0; y < fHeight; y++) {  /* black side bars */\n'
+     '\t\t\t\t\tbzero((void *)(fPixels + (uint64_t)y * fRowBytes), (size_t)fRowBytes);\n'
+     '\t\t\t\t}\n'
+     '\t\t\t}\n'
+     '\t\t}\n'
+     '\t\tthread_t t;\n'
+     '\t\tif (stage != 0) {\n'
+     '\t\t\tif (!sweet_fb_scaled) {\n'
+     '\t\t\t\tsweet_fb_copy(stage, fRowBytes, fPixels, fRowBytes, fRowBytes, (int32_t)fHeight);\n'
+     '\t\t\t}\n', 1),
+    ('\t\t\t\tIOLog("SWEET FB: staged present, %llu bytes\\n", (uint64_t)fRowBytes * fHeight);\n',
+     '\t\t\t\tIOLog("SWEET FB: staged present, stage %ux%u, %s\\n", sweet_fb_stage_w, sweet_fb_stage_h,\n'
+     '\t\t\t\t    sweet_fb_scaled ? "scaled to the panel height" : "1:1");\n', 1),
+    # copy targets: stage in logical coordinates when scaling
+    ('\tuintptr_t panel = sweet_fb_stage != 0 ? sweet_fb_stage : fPixels;\n',
+     '\tuintptr_t panel = sweet_fb_stage != 0 ? sweet_fb_stage : fPixels;\n'
+     '\tbool logical = sweet_fb_stage != 0 && sweet_fb_scaled;\n'
+     '\tint32_t offX = logical ? 0 : fOffX, offY = logical ? 0 : fOffY;\n'
+     '\tint32_t tgtW = logical ? (int32_t)sweet_fb_stage_w : (int32_t)fWidth;\n'
+     '\tint32_t tgtH = logical ? (int32_t)sweet_fb_stage_h : (int32_t)fHeight;\n'
+     '\tuint64_t tgtStride = logical ? (uint64_t)sweet_fb_stage_w * 4 : fRowBytes;\n', 1),
+    ('\t\t/* Logical (presented) display coordinates -> panel coordinates. */\n'
+     '\t\tdx -= fOffX;\n'
+     '\t\tdy -= fOffY;\n',
+     '\t\t/* Logical (presented) display coordinates -> panel coordinates. */\n'
+     '#if defined(DREAMLTE)\n'
+     '\t\tdx -= offX;\n'
+     '\t\tdy -= offY;\n'
+     '#else\n'
+     '\t\tdx -= fOffX;\n'
+     '\t\tdy -= fOffY;\n'
+     '#endif\n', 1),
+    ('\t\tif (w > (int32_t)fWidth - dx) {\n'
+     '\t\t\tw = (int32_t)fWidth - dx;\n'
+     '\t\t}\n'
+     '\t\tif (h > (int32_t)fHeight - dy) {\n'
+     '\t\t\th = (int32_t)fHeight - dy;\n'
+     '\t\t}\n',
+     '#if defined(DREAMLTE)\n'
+     '\t\tif (w > tgtW - dx) {\n'
+     '\t\t\tw = tgtW - dx;\n'
+     '\t\t}\n'
+     '\t\tif (h > tgtH - dy) {\n'
+     '\t\t\th = tgtH - dy;\n'
+     '\t\t}\n'
+     '#else\n'
+     '\t\tif (w > (int32_t)fWidth - dx) {\n'
+     '\t\t\tw = (int32_t)fWidth - dx;\n'
+     '\t\t}\n'
+     '\t\tif (h > (int32_t)fHeight - dy) {\n'
+     '\t\t\th = (int32_t)fHeight - dy;\n'
+     '\t\t}\n'
+     '#endif\n', 1),
+    ('\t\t\tsweet_fb_copy(panel + (uint64_t)dy * fRowBytes + (uint64_t)dx * 4, fRowBytes,\n',
+     '\t\t\tsweet_fb_copy(panel + (uint64_t)dy * tgtStride + (uint64_t)dx * 4, tgtStride,\n', 1),
+])
+
 # Clock per core: K2c ran all eight cores, but nobody knows the Mongoose
 # clock (CMU_CPUCL0 was never readable with the cluster off). Each core
 # counts PMCCNTR cycles over 10 ms of the 26 MHz timebase in initCPU;
