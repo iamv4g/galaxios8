@@ -64,6 +64,9 @@ REMOVED_JOBS = {
     'com.apple.bluetoothd',             # BCM4361 not driven
     'com.apple.WirelessRadioManager',   # modem / radios
     'com.apple.fairplayd.H2',           # FairPlay: App Store apps only
+    # run p7: started hundreds of times, each exits at once
+    'com.apple.lskdd',                  # AppleKeyServices (needs the SEP)
+    'com.apple.nanotimekitcompaniond',  # Apple Watch faces
 }
 
 

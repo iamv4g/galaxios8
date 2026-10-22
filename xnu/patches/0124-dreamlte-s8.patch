@@ -1080,7 +1080,7 @@ index 55d0057..a3a4a0a 100644
  	int32_t rc = sweet_psci_cpu_on(cpu->phys_id, entry, getCPUNumber());
  	IOLog(CPU_PORT_NAME " CPU: cpu=%u PSCI CPU_ON rc=%d\n", getCPUNumber(), rc);
 diff --git iokit/Kernel/arm/SweetFramebuffer.cpp iokit/Kernel/arm/SweetFramebuffer.cpp
-index 356ff51..aeb4007 100644
+index 356ff51..980c396 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -48,6 +48,7 @@ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
@@ -1142,7 +1142,7 @@ index 356ff51..aeb4007 100644
  	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
  
  	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
-@@ -302,6 +316,235 @@ get32(const uint8_t *p, uint32_t off)
+@@ -302,6 +316,247 @@ get32(const uint8_t *p, uint32_t off)
  	return v;
  }
  
@@ -1195,6 +1195,7 @@ index 356ff51..aeb4007 100644
 +static bool sweet_fb_scaled;
 +static uint16_t *sweet_fb_xmap, *sweet_fb_ymap;  /* panel -> stage x / y */
 +static uint32_t sweet_fb_out_w, sweet_fb_out_x0;
++static uint32_t sweet_fb_xstep;         /* 16.16 stage pixels per panel pixel */
 +
 +static void
 +sweet_fb_scale_rows(const struct sweet_fb_copy_job *j)
@@ -1204,8 +1205,19 @@ index 356ff51..aeb4007 100644
 +		uint32_t *out = (uint32_t *)(j->dst + (uint64_t)y * j->dstride) + sweet_fb_out_x0;
 +		if (sweet_fb_ymap[y] != built) {
 +			const uint32_t *in = (const uint32_t *)(j->src + (uint64_t)sweet_fb_ymap[y] * j->sstride);
-+			for (uint32_t x = 0; x < sweet_fb_out_w; x++) {
-+				j->row[x] = in[sweet_fb_xmap[x]];
++			uint32_t *r = j->row, n = sweet_fb_out_w, step = sweet_fb_xstep;
++			uint32_t acc = step / 2, x = 0;
++			for (; x + 4 <= n; x += 4) {
++				uint32_t p0 = in[acc >> 16], p1 = in[(acc + step) >> 16];
++				uint32_t p2 = in[(acc + 2 * step) >> 16], p3 = in[(acc + 3 * step) >> 16];
++				acc += 4 * step;
++				r[x] = p0;
++				r[x + 1] = p1;
++				r[x + 2] = p2;
++				r[x + 3] = p3;
++			}
++			for (; x < n; x++, acc += step) {
++				r[x] = in[acc >> 16];
 +			}
 +			built = sweet_fb_ymap[y];
 +		}
@@ -1378,7 +1390,7 @@ index 356ff51..aeb4007 100644
  static uint32_t sweet_fb_swaps_logged;
  static uint64_t sweet_fb_swap_count;
  
-@@ -318,7 +561,16 @@ AppleCLCD::swap(const uint8_t *rec)
+@@ -318,7 +573,16 @@ AppleCLCD::swap(const uint8_t *rec)
  	IOLockLock(fLock);
  	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
  	fDirty = true;
@@ -1395,7 +1407,7 @@ index 356ff51..aeb4007 100644
  	if ((++sweet_fb_swap_count % 1000) == 0) {
  		IOLog("SWEET FB: %llu swaps\n", sweet_fb_swap_count);
  	}
-@@ -328,6 +580,98 @@ void
+@@ -328,6 +592,99 @@ void
  AppleCLCD::present(const uint8_t *rec)
  {
  	uint32_t mask = get32(rec, 0x104);
@@ -1427,6 +1439,7 @@ index 356ff51..aeb4007 100644
 +		if (sweet_fb_scaled && stage != 0) {
 +			sweet_fb_out_w = fLogicalW * fHeight / fLogicalH;
 +			sweet_fb_out_x0 = (fWidth - sweet_fb_out_w) / 2;
++			sweet_fb_xstep = (fLogicalW << 16) / sweet_fb_out_w;
 +			sweet_fb_xmap = (uint16_t *)IOMallocData(sweet_fb_out_w * sizeof(uint16_t));
 +			sweet_fb_ymap = (uint16_t *)IOMallocData(fHeight * sizeof(uint16_t));
 +			bool rows_ok = true;
@@ -1494,7 +1507,7 @@ index 356ff51..aeb4007 100644
  
  
  	if (!fConsolePaused) {
-@@ -380,8 +724,13 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -380,8 +737,13 @@ AppleCLCD::present(const uint8_t *rec)
  			dx = dy = 0;
  		}
  		/* Logical (presented) display coordinates -> panel coordinates. */
@@ -1508,7 +1521,7 @@ index 356ff51..aeb4007 100644
  		if (dx < 0) {
  			sx -= dx;
  			w += dx;
-@@ -398,12 +747,21 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -398,12 +760,21 @@ AppleCLCD::present(const uint8_t *rec)
  		if (h > (int32_t)s->height - sy) {
  			h = (int32_t)s->height - sy;
  		}
@@ -1530,7 +1543,7 @@ index 356ff51..aeb4007 100644
  		uint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow +
  		    (uint64_t)(sx + w) * 4;
  		if (w <= 0 || h <= 0 || s->elementWidth != 1 || s->elementHeight != 1 ||
-@@ -411,14 +769,49 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -411,14 +782,49 @@ AppleCLCD::present(const uint8_t *rec)
  			src = 0;
  		}
  		if (src != 0 && bpe == 4) {

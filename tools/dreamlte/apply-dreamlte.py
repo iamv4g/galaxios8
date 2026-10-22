@@ -1375,6 +1375,38 @@ edit('iokit/Kernel/arm/SweetFramebuffer.cpp', [
      '\t}\n', 1),
 ])
 
+# Smoothness, step 5 (run p8: ~50 frames/s rendered, the panel ~42/s,
+# limited by the presenter's 15 ms scale). The column map made every pixel a
+# dependent load (map, then pixel) on in-order A53s; kernel code has no NEON.
+# Step through the source row in 16.16 fixed point, four pixels at a time.
+edit('iokit/Kernel/arm/SweetFramebuffer.cpp', [
+    ('static uint32_t sweet_fb_out_w, sweet_fb_out_x0;\n',
+     'static uint32_t sweet_fb_out_w, sweet_fb_out_x0;\n'
+     'static uint32_t sweet_fb_xstep;         /* 16.16 stage pixels per panel pixel */\n', 1),
+    ('\t\t\tconst uint32_t *in = (const uint32_t *)(j->src + (uint64_t)sweet_fb_ymap[y] * j->sstride);\n'
+     '\t\t\tfor (uint32_t x = 0; x < sweet_fb_out_w; x++) {\n'
+     '\t\t\t\tj->row[x] = in[sweet_fb_xmap[x]];\n'
+     '\t\t\t}\n',
+     '\t\t\tconst uint32_t *in = (const uint32_t *)(j->src + (uint64_t)sweet_fb_ymap[y] * j->sstride);\n'
+     '\t\t\tuint32_t *r = j->row, n = sweet_fb_out_w, step = sweet_fb_xstep;\n'
+     '\t\t\tuint32_t acc = step / 2, x = 0;\n'
+     '\t\t\tfor (; x + 4 <= n; x += 4) {\n'
+     '\t\t\t\tuint32_t p0 = in[acc >> 16], p1 = in[(acc + step) >> 16];\n'
+     '\t\t\t\tuint32_t p2 = in[(acc + 2 * step) >> 16], p3 = in[(acc + 3 * step) >> 16];\n'
+     '\t\t\t\tacc += 4 * step;\n'
+     '\t\t\t\tr[x] = p0;\n'
+     '\t\t\t\tr[x + 1] = p1;\n'
+     '\t\t\t\tr[x + 2] = p2;\n'
+     '\t\t\t\tr[x + 3] = p3;\n'
+     '\t\t\t}\n'
+     '\t\t\tfor (; x < n; x++, acc += step) {\n'
+     '\t\t\t\tr[x] = in[acc >> 16];\n'
+     '\t\t\t}\n', 1),
+    ('\t\t\tsweet_fb_out_x0 = (fWidth - sweet_fb_out_w) / 2;\n',
+     '\t\t\tsweet_fb_out_x0 = (fWidth - sweet_fb_out_w) / 2;\n'
+     '\t\t\tsweet_fb_xstep = (fLogicalW << 16) / sweet_fb_out_w;\n', 1),
+])
+
 # Clock per core: K2c ran all eight cores, but nobody knows the Mongoose
 # clock (CMU_CPUCL0 was never readable with the cluster off). Each core
 # counts PMCCNTR cycles over 10 ms of the 26 MHz timebase in initCPU;
