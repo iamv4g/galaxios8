@@ -280,9 +280,10 @@ loader now writes both.
 
 - Phone state: stopped in the K2 boot (`cpus=8`); needs a forced reboot into
   TWRP (Power + Volume Down, then Power + Bixby + Volume Up at once).
-- Kernel from CI run 39707064974 (SHA-256 `cb949c45...53cd8`, commit
-  ffa3ee7) adds `PE_halt_restart` (restart, panic, PS_HOLD power-off) and the
-  console tail in this TWRP's pmsg zone. Not booted yet. Images built locally
+- Kernel from CI run 39715410874 (SHA-256 `db993b04...a17d0`, commit
+  e5cff81): `PE_halt_restart` (restart, panic, PS_HOLD power-off), the
+  console tail in this TWRP's pmsg zone, and SweetCPU matching the Mongoose
+  nodes (the K2 cause). Not booted yet. Images built locally
   (git-ignored): `shim/dreamlte/out/s8-k2b-boot.img` (`cpus=8
   s8autoreset=240`: a panic now resets into TWRP with the panic in pmsg) and
   `shim/dreamlte/out/s8-daily-boot.img` (`cpus=4`, no autoreset). Known-good
