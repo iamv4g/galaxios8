@@ -332,6 +332,20 @@ Aff1 still indexes `cluster_offsets`), and `s8_halt_restart` also acts on
 `kPEPanicDiagnosticsDone` (10), which debug.c sends after the panic text and
 before waiting for KDP: into TWRP with `s8autoreset`, else a normal restart.
 
+## K2c: eight cores in iOS (2026-10-22 18:35, CI 39770480628)
+
+Kernel SHA-256 `21a7799c...9904c`, `cpus=8 s8autoreset=240`, run by
+`cycle.sh` (back in TWRP after 5 min; the user saw iOS, then the reset):
+`8/8 CPUs initialized, SGI1 verified`, Mongoose MPIDR 0x0-0x3 started by
+one PSCI CPU_ON each (GICD_CTLR already 1), `hfs: mounted`, SpringBoard,
+backboardd, no panic, `S8 AUTORESET` after 240 s.
+
+Speed not shown yet: per second of boot, K1 (4 cores, 180 s: 15 frame swaps,
+663 execs) and K2c (8 cores, 240 s: 22 swaps, 836 execs) look the same. The
+Mongoose clock is unknown (S-Boot may leave CPUCL0 on the 26 MHz
+oscillator), and the scheduler now treats all eight cores alike. Next kernel
+logs each core's MHz (PMCCNTR over 10 ms in initCPU).
+
 ## Open work
 
 1. Boot the latest kernel/loader: does the frame-done copy remove the tearing,

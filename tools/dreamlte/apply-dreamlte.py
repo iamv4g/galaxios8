@@ -726,6 +726,51 @@ edit('iokit/Kernel/arm/SweetCPU.cpp', [
      '\t__builtin_arm_dsb(DSB_SY);\n\tint32_t rc = sweet_psci_cpu_on(cpu->phys_id, entry, getCPUNumber());\n', 1),
 ])
 
+# Clock per core: K2c ran all eight cores, but nobody knows the Mongoose
+# clock (CMU_CPUCL0 was never readable with the cluster off). Each core
+# counts PMCCNTR cycles over 10 ms of the 26 MHz timebase in initCPU;
+# startAll logs it next to "came alive".
+edit('iokit/Kernel/arm/SweetCPU.cpp', [
+    ('OSDefineMetaClassAndStructors(SweetCPU, IOCPU);\n',
+     'OSDefineMetaClassAndStructors(SweetCPU, IOCPU);\n'
+     '\n'
+     '#if defined(DREAMLTE)\n'
+     'static uint32_t sweet_cpu_mhz[SWEET_SMP_MAX_CPUS];\n'
+     '\n'
+     'static uint32_t\n'
+     'sweet_measure_mhz(void)\n'
+     '{\n'
+     '\tuint64_t pmcr = __builtin_arm_rsr64("PMCR_EL0");\n'
+     '\t__builtin_arm_wsr64("PMCCFILTR_EL0", 0);         /* count at EL0 and EL1 */\n'
+     '\t__builtin_arm_wsr64("PMCNTENSET_EL0", 1ULL << 31); /* cycle counter */\n'
+     '\t__builtin_arm_wsr64("PMCR_EL0", pmcr | 1 | 4);   /* enable, reset it */\n'
+     '\t__builtin_arm_isb(ISB_SY);\n'
+     '\tuint64_t t0 = mach_absolute_time();\n'
+     '\tuint64_t c0 = __builtin_arm_rsr64("PMCCNTR_EL0");\n'
+     '\twhile (mach_absolute_time() - t0 < 260000) {      /* 10 ms at 26 MHz */\n'
+     '\t}\n'
+     '\tuint64_t c1 = __builtin_arm_rsr64("PMCCNTR_EL0");\n'
+     '\treturn (uint32_t)((c1 - c0) / 10000);\n'
+     '}\n'
+     '#endif\n', 1),
+    ('\t__atomic_store_n(&initialized, 1, __ATOMIC_RELEASE);\n}\n',
+     '#if defined(DREAMLTE)\n'
+     '\tif (getCPUNumber() < SWEET_SMP_MAX_CPUS) {\n'
+     '\t\tsweet_cpu_mhz[getCPUNumber()] = sweet_measure_mhz();\n'
+     '\t}\n'
+     '#endif\n'
+     '\t__atomic_store_n(&initialized, 1, __ATOMIC_RELEASE);\n}\n', 1),
+    ('\t\tIOLog(CPU_PORT_NAME " CPU: cpu=%u mpidr=0x%x came alive; SGI1 OK\\n",\n'
+     '\t\t    i, topology->cpus[i].phys_id);\n',
+     '#if defined(DREAMLTE)\n'
+     '\t\tIOLog(CPU_PORT_NAME " CPU: cpu=%u mpidr=0x%x came alive; SGI1 OK; %u MHz\\n",\n'
+     '\t\t    i, topology->cpus[i].phys_id, sweet_cpu_mhz[i]);\n'
+     '#else\n'
+     '\t\tIOLog(CPU_PORT_NAME " CPU: cpu=%u mpidr=0x%x came alive; SGI1 OK\\n",\n'
+     '\t\t    i, topology->cpus[i].phys_id);\n'
+     '#endif\n', 1),
+])
+
 # K2b (cpus=8): with the A53 and Mongoose cores in two clusters (two
 # scheduler psets) the first secondary panicked "Ticket lock ... is
 # unexpectedly owned" on pset0's lock (pset0 + 0x108) as it came online; the
