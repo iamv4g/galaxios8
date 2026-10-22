@@ -147,6 +147,12 @@ def main():
                            'SilentICDPUpgrade')})
     merge_pref(root, 'com.apple.managedconfiguration.notbackedup', {
         'LockdownActivationIndicatesCloudConfigurationAvailable': False})
+    # No GPU: CoreAnimation renders on the CPU, where background blurs (dock,
+    # folders, Control Center, notifications) and motion effects cost the
+    # most. Settings > Accessibility: Reduce Transparency, Reduce Motion.
+    merge_pref(root, 'com.apple.Accessibility', {
+        'EnhancedBackgroundContrastEnabled': True,
+        'ReduceMotionEnabled': True})
 
 
 if __name__ == '__main__':

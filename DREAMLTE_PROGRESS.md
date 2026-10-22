@@ -357,6 +357,23 @@ The phone's BOOT is now `s8-daily8-boot.img` (same kernel, `cpus=8`, no
 autoreset; SHA-256 `e48f4c4e...413c1`), so a normal reboot boots iOS on
 eight cores. A long run has not been done yet.
 
+## Smoothness work (2026-10-22 evening)
+
+- soak20 (CI 39772603639 kernel, `cpus=8 s8autoreset=1200`): eight cores
+  for 20 minutes without a panic. Only ~11 swaps in that time: an idle lock
+  screen does not redraw, so idle runs cannot measure smoothness.
+- Display path (SweetFramebuffer.cpp): `sweetfb_hz` defaulted to 10, so at
+  most 10 frames per second reached the panel; `present()` runs inside
+  backboardd's SwapEnd, waits for a DECON frame-done (up to 16 ms) and
+  copies 17 MB, blocking CoreAnimation's render thread.
+- Kernel changes: the copy is split over the caller and three helper
+  threads; every 100 presents the log gives uptime, average wait, average
+  copy and the swap count; boot-arg `s8swipe=N` (+ `s8swipe_start`) plays a
+  scripted swipe every N s through the HID path (unlock, then home-screen
+  pages) for unattended measurements.
+- `sweet-root-tweaks.py` now turns on Reduce Transparency and Reduce Motion
+  (no CPU blurs). Not on the phone's current root: TWRP has no HFS+.
+
 ## Open work
 
 1. Boot the latest kernel/loader: does the frame-done copy remove the tearing,

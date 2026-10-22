@@ -81,7 +81,7 @@ index 3ba2fd4..dcbd143 100644
  		return;
  	}
 diff --git bsd/dev/a5xelte_touch.c bsd/dev/a5xelte_touch.c
-index 7ba309b..ba647a8 100644
+index 7ba309b..aa8b29d 100644
 --- a/bsd/dev/a5xelte_touch.c
 +++ b/bsd/dev/a5xelte_touch.c
 @@ -12,6 +12,7 @@
@@ -92,7 +92,7 @@ index 7ba309b..ba647a8 100644
  
  extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
  extern void thread_terminate_self(void);
-@@ -615,10 +616,317 @@ a5touch_start_early(vm_offset_t nfc, vm_offset_t alive)
+@@ -615,10 +616,367 @@ a5touch_start_early(vm_offset_t nfc, vm_offset_t alive)
  	}
  }
  
@@ -359,6 +359,49 @@ index 7ba309b..ba647a8 100644
 +	return (*mv >= 2800 && *mv <= 4600) ? 0 : -1;
 +}
 +
++/*
++ * Test input for unattended smoothness measurements: boot-arg s8swipe=N
++ * plays a scripted gesture every N seconds with a sixth finger (id 4)
++ * through the same HID path as the panel, starting s8swipe_start seconds
++ * (default 300) after the touch driver: one swipe up (unlock to the home
++ * screen), then home-screen page swipes left and right. Off by default.
++ */
++extern uint64_t mach_absolute_time(void);
++static unsigned s8ts_swipe_secs, s8ts_swipe_start = 300;
++
++static void
++s8ts_swipe(int x0, int y0, int x1, int y1)
++{
++	for (int i = 0; i <= 12; i++) {             /* 12 steps of 25 ms */
++		sweet_hid_touch(4, 1, x0 + (x1 - x0) * i / 12, y0 + (y1 - y0) * i / 12);
++		s8ts_wait(25);
++	}
++	sweet_hid_touch(4, 0, x1, y1);
++}
++
++static void
++s8ts_script_thread(void *arg, wait_result_t result)
++{
++	(void)arg;
++	(void)result;
++	for (unsigned s = 0; s < s8ts_swipe_start; s++) {
++		s8ts_wait(1000);
++	}
++	for (unsigned n = 0;; n++) {
++		printf("S8 SWIPE: %u at %llu s\n", n, mach_absolute_time() / 26000000ULL);
++		if (n == 0) {
++			s8ts_swipe(540, 1880, 540, 700);   /* from the bottom edge: unlock */
++		} else if (n & 1) {
++			s8ts_swipe(900, 1000, 150, 1000);  /* next home-screen page */
++		} else {
++			s8ts_swipe(150, 1000, 900, 1000);  /* back */
++		}
++		for (unsigned s = 0; s < s8ts_swipe_secs; s++) {
++			s8ts_wait(1000);
++		}
++	}
++}
++
 +static void
 +dreamlte_touch_start(void)
 +{
@@ -391,6 +434,13 @@ index 7ba309b..ba647a8 100644
 +	    !s8i2c_xfer(s8ts_i2c, S8TS_ADDR, &sense, 1, NULL, 0)) {
 +		printf("S8 TOUCH: enable sequence failed\n");
 +		return;
++	}
++	(void)PE_parse_boot_argn("s8swipe", &s8ts_swipe_secs, sizeof(s8ts_swipe_secs));
++	(void)PE_parse_boot_argn("s8swipe_start", &s8ts_swipe_start, sizeof(s8ts_swipe_start));
++	if (s8ts_swipe_secs != 0 &&
++	    kernel_thread_start(s8ts_script_thread, NULL, &thread) == KERN_SUCCESS) {
++		printf("S8 TOUCH: scripted swipes every %u s from %u s\n", s8ts_swipe_secs, s8ts_swipe_start);
++		thread_deallocate(thread);
 +	}
 +	if (kernel_thread_start(s8ts_thread, NULL, &thread) == KERN_SUCCESS) {
 +		thread_deallocate(thread);
@@ -925,7 +975,7 @@ index 55d0057..a3a4a0a 100644
  	int32_t rc = sweet_psci_cpu_on(cpu->phys_id, entry, getCPUNumber());
  	IOLog(CPU_PORT_NAME " CPU: cpu=%u PSCI CPU_ON rc=%d\n", getCPUNumber(), rc);
 diff --git iokit/Kernel/arm/SweetFramebuffer.cpp iokit/Kernel/arm/SweetFramebuffer.cpp
-index 356ff51..c14d5d9 100644
+index 356ff51..57b02e8 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -48,6 +48,7 @@ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
@@ -1164,9 +1214,9 @@ index 356ff51..c14d5d9 100644
 +#if defined(DREAMLTE)
 +	sweet_fb_copy_ticks += mach_absolute_time() - t_copy;
 +	if ((++sweet_fb_presents % 100) == 0) {
-+		IOLog("SWEET FB: %llu presents, last 100: wait %llu us, copy %llu us avg; %llu swaps\n",
-+		    sweet_fb_presents, sweet_fb_wait_ticks / 2600, sweet_fb_copy_ticks / 2600,
-+		    sweet_fb_swap_count);
++		IOLog("SWEET FB: %llu presents at %llu s, last 100: wait %llu us, copy %llu us avg; %llu swaps\n",
++		    sweet_fb_presents, mach_absolute_time() / 26000000ULL, sweet_fb_wait_ticks / 2600,
++		    sweet_fb_copy_ticks / 2600, sweet_fb_swap_count);
 +		sweet_fb_wait_ticks = sweet_fb_copy_ticks = 0;
 +	}
 +#endif

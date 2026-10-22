@@ -261,6 +261,49 @@ dreamlte_battery_read(unsigned *percent, unsigned *mv, int *ma,
 	return (*mv >= 2800 && *mv <= 4600) ? 0 : -1;
 }
 
+/*
+ * Test input for unattended smoothness measurements: boot-arg s8swipe=N
+ * plays a scripted gesture every N seconds with a sixth finger (id 4)
+ * through the same HID path as the panel, starting s8swipe_start seconds
+ * (default 300) after the touch driver: one swipe up (unlock to the home
+ * screen), then home-screen page swipes left and right. Off by default.
+ */
+extern uint64_t mach_absolute_time(void);
+static unsigned s8ts_swipe_secs, s8ts_swipe_start = 300;
+
+static void
+s8ts_swipe(int x0, int y0, int x1, int y1)
+{
+	for (int i = 0; i <= 12; i++) {             /* 12 steps of 25 ms */
+		sweet_hid_touch(4, 1, x0 + (x1 - x0) * i / 12, y0 + (y1 - y0) * i / 12);
+		s8ts_wait(25);
+	}
+	sweet_hid_touch(4, 0, x1, y1);
+}
+
+static void
+s8ts_script_thread(void *arg, wait_result_t result)
+{
+	(void)arg;
+	(void)result;
+	for (unsigned s = 0; s < s8ts_swipe_start; s++) {
+		s8ts_wait(1000);
+	}
+	for (unsigned n = 0;; n++) {
+		printf("S8 SWIPE: %u at %llu s\n", n, mach_absolute_time() / 26000000ULL);
+		if (n == 0) {
+			s8ts_swipe(540, 1880, 540, 700);   /* from the bottom edge: unlock */
+		} else if (n & 1) {
+			s8ts_swipe(900, 1000, 150, 1000);  /* next home-screen page */
+		} else {
+			s8ts_swipe(150, 1000, 900, 1000);  /* back */
+		}
+		for (unsigned s = 0; s < s8ts_swipe_secs; s++) {
+			s8ts_wait(1000);
+		}
+	}
+}
+
 static void
 dreamlte_touch_start(void)
 {
@@ -293,6 +336,13 @@ dreamlte_touch_start(void)
 	    !s8i2c_xfer(s8ts_i2c, S8TS_ADDR, &sense, 1, NULL, 0)) {
 		printf("S8 TOUCH: enable sequence failed\n");
 		return;
+	}
+	(void)PE_parse_boot_argn("s8swipe", &s8ts_swipe_secs, sizeof(s8ts_swipe_secs));
+	(void)PE_parse_boot_argn("s8swipe_start", &s8ts_swipe_start, sizeof(s8ts_swipe_start));
+	if (s8ts_swipe_secs != 0 &&
+	    kernel_thread_start(s8ts_script_thread, NULL, &thread) == KERN_SUCCESS) {
+		printf("S8 TOUCH: scripted swipes every %u s from %u s\n", s8ts_swipe_secs, s8ts_swipe_start);
+		thread_deallocate(thread);
 	}
 	if (kernel_thread_start(s8ts_thread, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
