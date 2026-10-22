@@ -54,6 +54,19 @@ def merge_pref(root, name, values):
     print('pref', name, sorted(values))
 
 
+# Daemons for hardware the Galaxy S8 port does not drive. galaxios8 run p5
+# (14 min): locationd crashed 106 times, WirelessRadioManagerd 45 times,
+# bluetoothd and fairplayd.H2 were started ~80 times each (KeepAlive), and
+# ReportCrash handled every crash, all while the user was trying the UI.
+REMOVED_JOBS = {
+    'com.apple.CommCenter',
+    'com.apple.locationd',              # GPS / sensors behind the SSP hub
+    'com.apple.bluetoothd',             # BCM4361 not driven
+    'com.apple.WirelessRadioManager',   # modem / radios
+    'com.apple.fairplayd.H2',           # FairPlay: App Store apps only
+}
+
+
 def launchd(root):
     path = os.path.join(root, 'System/Library/xpc/launchd.plist')
     st = os.stat(path)
@@ -64,11 +77,12 @@ def launchd(root):
         if '_PanicOnCrash' in job:
             job['_PanicOnCrasX'] = job.pop('_PanicOnCrash')
             renamed += 1
-    removed = [k for k, j in jobs.items() if j.get('Label') == 'com.apple.CommCenter']
+    removed = [k for k, j in jobs.items() if j.get('Label') in REMOVED_JOBS]
     for k in removed:
         del jobs[k]
     save(path, plist, st.st_uid, st.st_gid, st.st_mode & 0o7777)
-    print(f'launchd.plist: {renamed} _PanicOnCrash renamed, {len(removed)} CommCenter jobs removed')
+    print(f'launchd.plist: {renamed} _PanicOnCrash renamed, {len(removed)} jobs removed '
+          f'({", ".join(sorted(jobs_label for jobs_label in REMOVED_JOBS))})')
 
 
 def containers(root):
@@ -122,10 +136,14 @@ def audio(root):
         print('StartRecorderServer off', os.path.relpath(conf, root))
 
 
+REDUCE_EFFECTS = '--reduce-effects' in sys.argv
+
+
 def main():
-    if len(sys.argv) != 2 or not os.path.isdir(os.path.join(sys.argv[1], 'System/Library/xpc')):
+    args = [a for a in sys.argv[1:] if a != '--reduce-effects']
+    if len(args) != 1 or not os.path.isdir(os.path.join(args[0], 'System/Library/xpc')):
         sys.exit(__doc__)
-    root = sys.argv[1]
+    root = args[0]
     launchd(root)
     containers(root)
     activation(root)
@@ -147,12 +165,19 @@ def main():
                            'SilentICDPUpgrade')})
     merge_pref(root, 'com.apple.managedconfiguration.notbackedup', {
         'LockdownActivationIndicatesCloudConfigurationAvailable': False})
+    if REDUCE_EFFECTS:
+        reduce_effects(root)
+
+
+def reduce_effects(root):
     # No GPU: CoreAnimation renders on the CPU, where background blurs (dock,
     # folders, Control Center, notifications) and motion effects cost the
     # most. Settings > Accessibility: Reduce Transparency, Reduce Motion.
+    # Changes the look of iOS, so only with --reduce-effects.
     merge_pref(root, 'com.apple.Accessibility', {
         'EnhancedBackgroundContrastEnabled': True,
         'ReduceMotionEnabled': True})
+    print('Reduce Transparency and Reduce Motion on')
 
 
 if __name__ == '__main__':

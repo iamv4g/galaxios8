@@ -397,6 +397,24 @@ eight cores. A long run has not been done yet.
   processes; `s8autoreset` does a clean shutdown (`reboot_kernel`: sync,
   unmount, so the HFS+ journal is empty) before resetting into TWRP, with a
   30 s direct-reset fallback.
+- p6: panicked one minute in, at the first refused exec
+  (`kern_exec.c:7612 signature_failure_reason != OS_REASON_NULL`); the panic
+  reset into TWRP with the text in pmsg, as designed. Fixed (65e2526).
+- **p6b** (staged present, 1440x2960, `s8noexec`): render thread 3.5-3.7 ms
+  per frame, presenter waits ~8.5 ms and copies ~3.1 ms; frames kept coming
+  for the whole run (3000 by 573 s), peak ~33 frames/s like p3. So the cap is
+  now CoreAnimation's own render time (~30 ms/frame), not the display path.
+  `s8noexec` backfired: locationd was refused 271 times (launchd retries an
+  immediate failure faster). Its clean shutdown worked (pmsg ends with
+  IOPMrootDomain "Restart total 2049 ms").
+- Root edited in place (`tools/dreamlte/edit-live-root.sh`): first 16 GiB of
+  USERDATA pulled (10 min), fsck found only "Incorrect number of file hard
+  links" (repaired), launchd.plist lost com.apple.locationd, bluetoothd,
+  WirelessRadioManager, fairplayd.H2 (CommCenter was already gone), fsck OK;
+  11 changed 32 MiB chunks written and verified. `--reduce-effects` (Reduce
+  Transparency/Motion) is optional and not applied: the user has not chosen.
+- Kernel 56a0dba: `sweetfb_scale=1` (with `sweetfb_native=0`) renders
+  1125x2436 and the presenter scales it to 1367x2960 (36 px bars); run p7.
 
 ## Open work
 
