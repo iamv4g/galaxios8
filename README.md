@@ -98,6 +98,7 @@ S-Boot (stock Samsung bootloader, EL1, MMU off)
 | `tools/mkiosroot.sh`, `tools/dreamlte/finish-iosroot.sh` | iOS root image build |
 | `tools/dreamlte/flash-chunks.ps1`, `flash-chunks.sh` | Writes an image to BOOT / USERDATA in verified chunks (PowerShell, bash for macOS/Linux) |
 | `tools/dreamlte/pull-sweetlog.ps1`, `pull-sweetlog.sh` | Pulls the boot logs from TWRP |
+| `docs/plan.md`, `docs/spec.md` | Product plan (definition of done, work streams, milestones) and system specification |
 | `DREAMLTE_PROGRESS.md` | **S8 port log**: hardware facts, every boot, open work (the handoff file) |
 | `docs/history/` | Galaxy A5 2016 (`A5XELTE_PROGRESS.md`, `a5xelte-*.md`) and original SWEET / Redmi Note 10 Pro (`NOTES.md`, `upstream-README.md`) history, kept as reference |
 

@@ -261,8 +261,20 @@ loader now writes both.
 - Patch 0124 now: DREAMLTE SweetCPU sets GICD_CTLR bit 0 and does a single
   CPU_ON through the low trampoline (no PMU power edge); new boot-arg
   `s8autoreset=N` resets the kernel into TWRP N s after the UFS log starts
-  (after a log flush), for unattended kernel test cycles. Not yet built or
-  booted.
+  (after a log flush), for unattended kernel test cycles.
+- **K1** (CI run 39704628589, kernel SHA-256 `1b47c372...7b37b`, loader
+  without the old `mngs_probe`, `cpus=4 s8autoreset=180`): `4/4 CPUs
+  initialized`, each A53 started by one CPU_ON through the trampoline;
+  GICD_CTLR already read 0x1 (XNU's GIC driver had enabled it), so the PMU
+  power edge was never needed, only the trampoline. `hfs: mounted`,
+  SpringBoard, then `S8 AUTORESET` and the phone was back in TWRP after about
+  4 minutes, unattended.
+- **K2** (same kernel, `cpus=8 s8autoreset=180`, flashed 08:29): the phone
+  did not come back to TWRP within 8 minutes, so the kernel stopped before
+  the UFS log thread could run the reset (most likely a panic, which halts
+  with `debug=0xc`, or a hang while starting a Mongoose core). Needs the
+  screen and a TWRP log pull. The SweetCPU topology check already expects
+  MPIDR 0x0-0x3 for logical 4-7.
 
 ## Open work
 

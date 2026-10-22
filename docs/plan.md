@@ -126,7 +126,7 @@ CS47L93 codec + MAX98506 amp behind the ABOX DSP; an IOAudio/CoreAudio path woul
 
 ## 4. Next actions
 
-1. K1 and K2 (kernel built from commit a9ae746 by CI): `cpus=4` then `cpus=8`, each with `s8autoreset`.
+1. K1 passed (4 A53 cores with plain CPU_ON, unattended reset back to TWRP). K2 (`cpus=8`) stopped before the log thread: read the screen and the log, then fix XNU on the Mongoose cores (see W1 scenarios). Make panics reset into TWRP too (set INFORM3 in the panic path), so a crashing test does not need a person.
 2. Write `cycle.sh` once the user agrees to unattended flashing.
 3. Port the USB ECM gadget patches to the Exynos DWC3.
 4. Measure: time to lock screen and swipe fps on the current build, so later gains are numbers.
