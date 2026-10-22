@@ -925,7 +925,7 @@ index 55d0057..a3a4a0a 100644
  	int32_t rc = sweet_psci_cpu_on(cpu->phys_id, entry, getCPUNumber());
  	IOLog(CPU_PORT_NAME " CPU: cpu=%u PSCI CPU_ON rc=%d\n", getCPUNumber(), rc);
 diff --git iokit/Kernel/arm/SweetFramebuffer.cpp iokit/Kernel/arm/SweetFramebuffer.cpp
-index 356ff51..ec6b9da 100644
+index 356ff51..c14d5d9 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -48,6 +48,7 @@ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
@@ -987,7 +987,7 @@ index 356ff51..ec6b9da 100644
  	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
  
  	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
-@@ -302,6 +316,36 @@ get32(const uint8_t *p, uint32_t off)
+@@ -302,6 +316,124 @@ get32(const uint8_t *p, uint32_t off)
  	return v;
  }
  
@@ -1021,10 +1021,98 @@ index 356ff51..ec6b9da 100644
 +}
 +#endif
 +
++#if defined(DREAMLTE)
++extern "C" kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
++extern "C" void thread_deallocate(thread_t);
++
++#define SWEET_FB_COPY_HELPERS 3
++struct sweet_fb_copy_job {
++	uintptr_t dst, src;
++	uint64_t dstride, sstride, bytes;
++	int32_t rows;
++};
++static struct sweet_fb_copy_job sweet_fb_jobs[SWEET_FB_COPY_HELPERS];
++static IOLock *sweet_fb_copy_lock;
++static uint32_t sweet_fb_copy_gen, sweet_fb_copy_left;
++static uint64_t sweet_fb_wait_ticks, sweet_fb_copy_ticks, sweet_fb_presents;
++
++static void
++sweet_fb_copy_rows(const struct sweet_fb_copy_job *j)
++{
++	for (int32_t y = 0; y < j->rows; y++) {
++		memcpy((void *)(j->dst + (uint64_t)y * j->dstride),
++		    (const void *)(j->src + (uint64_t)y * j->sstride), (size_t)j->bytes);
++	}
++}
++
++static void
++sweet_fb_copy_helper(void *arg, wait_result_t wr __unused)
++{
++	uintptr_t idx = (uintptr_t)arg;
++	uint32_t seen = 0;
++
++	for (;;) {
++		IOLockLock(sweet_fb_copy_lock);
++		while (sweet_fb_copy_gen == seen) {
++			IOLockSleep(sweet_fb_copy_lock, &sweet_fb_copy_gen, THREAD_UNINT);
++		}
++		seen = sweet_fb_copy_gen;
++		IOLockUnlock(sweet_fb_copy_lock);
++		sweet_fb_copy_rows(&sweet_fb_jobs[idx]);
++		IOLockLock(sweet_fb_copy_lock);
++		if (--sweet_fb_copy_left == 0) {
++			IOLockWakeup(sweet_fb_copy_lock, &sweet_fb_copy_left, false);
++		}
++		IOLockUnlock(sweet_fb_copy_lock);
++	}
++}
++
++/* Copy rows x bytes, split over the helpers and the caller. */
++static void
++sweet_fb_copy(uintptr_t dst, uint64_t dstride, uintptr_t src, uint64_t sstride,
++    uint64_t bytes, int32_t rows)
++{
++	if (sweet_fb_copy_lock == NULL) {
++		sweet_fb_copy_lock = IOLockAlloc();
++		for (uintptr_t i = 0; sweet_fb_copy_lock != NULL && i < SWEET_FB_COPY_HELPERS; i++) {
++			thread_t t;
++			if (kernel_thread_start(sweet_fb_copy_helper, (void *)i, &t) == KERN_SUCCESS) {
++				thread_deallocate(t);
++			}
++		}
++	}
++	int32_t parts = SWEET_FB_COPY_HELPERS + 1;
++	if (sweet_fb_copy_lock == NULL || rows < 64) {
++		struct sweet_fb_copy_job all = { dst, src, dstride, sstride, bytes, rows };
++		sweet_fb_copy_rows(&all);
++		return;
++	}
++	int32_t per = rows / parts, at = 0;
++	IOLockLock(sweet_fb_copy_lock);
++	for (int32_t i = 0; i < SWEET_FB_COPY_HELPERS; i++, at += per) {
++		sweet_fb_jobs[i] = (struct sweet_fb_copy_job){
++			dst + (uint64_t)at * dstride, src + (uint64_t)at * sstride,
++			dstride, sstride, bytes, per };
++	}
++	sweet_fb_copy_left = SWEET_FB_COPY_HELPERS;
++	sweet_fb_copy_gen++;
++	IOLockWakeup(sweet_fb_copy_lock, &sweet_fb_copy_gen, false);
++	IOLockUnlock(sweet_fb_copy_lock);
++	struct sweet_fb_copy_job mine = { dst + (uint64_t)at * dstride, src + (uint64_t)at * sstride,
++		dstride, sstride, bytes, rows - at };
++	sweet_fb_copy_rows(&mine);
++	IOLockLock(sweet_fb_copy_lock);
++	while (sweet_fb_copy_left != 0) {
++		IOLockSleep(sweet_fb_copy_lock, &sweet_fb_copy_left, THREAD_UNINT);
++	}
++	IOLockUnlock(sweet_fb_copy_lock);
++}
++#endif
++
  static uint32_t sweet_fb_swaps_logged;
  static uint64_t sweet_fb_swap_count;
  
-@@ -318,7 +362,16 @@ AppleCLCD::swap(const uint8_t *rec)
+@@ -318,7 +450,16 @@ AppleCLCD::swap(const uint8_t *rec)
  	IOLockLock(fLock);
  	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
  	fDirty = true;
@@ -1041,21 +1129,47 @@ index 356ff51..ec6b9da 100644
  	if ((++sweet_fb_swap_count % 1000) == 0) {
  		IOLog("SWEET FB: %llu swaps\n", sweet_fb_swap_count);
  	}
-@@ -328,6 +381,10 @@ void
+@@ -328,6 +469,13 @@ void
  AppleCLCD::present(const uint8_t *rec)
  {
  	uint32_t mask = get32(rec, 0x104);
 +	IOLockLock(fPresentLock);
 +#if defined(DREAMLTE)
++	uint64_t t_wait = mach_absolute_time();
 +	sweet_fb_wait_frame_done();
++	uint64_t t_copy = mach_absolute_time();
++	sweet_fb_wait_ticks += t_copy - t_wait;
 +#endif
  
  
  	if (!fConsolePaused) {
-@@ -419,6 +476,7 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -411,14 +559,30 @@ AppleCLCD::present(const uint8_t *rec)
+ 			src = 0;
+ 		}
+ 		if (src != 0 && bpe == 4) {
++#if defined(DREAMLTE)
++			sweet_fb_copy(fPixels + (uint64_t)dy * fRowBytes + (uint64_t)dx * 4, fRowBytes,
++			    src + s->offset + (uint64_t)sy * s->bytesPerRow + (uint64_t)sx * 4,
++			    s->bytesPerRow, (uint64_t)w * 4, h);
++#else
+ 			for (int32_t y = 0; y < h; y++) {
+ 				memcpy((void *)(fPixels + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4),
+ 				    (const void *)(src + s->offset + (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4),
+ 				    (size_t)w * 4);
+ 			}
++#endif
  		}
  		s->release();
  	}
++#if defined(DREAMLTE)
++	sweet_fb_copy_ticks += mach_absolute_time() - t_copy;
++	if ((++sweet_fb_presents % 100) == 0) {
++		IOLog("SWEET FB: %llu presents, last 100: wait %llu us, copy %llu us avg; %llu swaps\n",
++		    sweet_fb_presents, sweet_fb_wait_ticks / 2600, sweet_fb_copy_ticks / 2600,
++		    sweet_fb_swap_count);
++		sweet_fb_wait_ticks = sweet_fb_copy_ticks = 0;
++	}
++#endif
 +	IOLockUnlock(fPresentLock);
  }
  
