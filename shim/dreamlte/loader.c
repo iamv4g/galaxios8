@@ -550,7 +550,11 @@ uint64_t dl_main(uintptr_t dtb, uint64_t el, uint64_t sctlr)
 	mngs_cycle(ba);
 	clean(ba_pa, ba_pa + PAGE_SIZE);
 #else
-	mngs_probe(kv, out);
+	/* mngs_probe powered Mongoose core 0x000 by hand (upstream boot 31);
+	 * since boot m8 XNU starts the cores with plain PSCI CPU_ON once the GIC
+	 * distributor is on, and a core left powered here would only get in the
+	 * way. */
+	(void)mngs_probe;
 #endif
 	/* smp_probe(kv, out) proved the PMU power-up (boot 19); it leaves the
 	 * probed cores' PMU power on, which hid the 0 -> 0xF edge XNU needs. */
