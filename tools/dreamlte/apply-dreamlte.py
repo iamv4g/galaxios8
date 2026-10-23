@@ -2383,3 +2383,20 @@ edit('pexpert/arm/pe_serial.c', [
      '\t}\n'
      '\tuint32_t reason = (s8_restart_to_recovery || (type != 1 && s8_panic_to_recovery)) ?\n', 1),
 ])
+
+# The 2 GiB write_pte_fast panic (c17, c21, c22; c19 passed): backtrace
+# (c22, "S8 BT") kernel_bootstrap_thread -> vm_commpage_init ->
+# commpage_populate -> pmap_create_commpages -> pmap_enter_options_addr ->
+# pmap_enter_pte. The commpage text goes to a random leaf index in 4 KiB
+# hardware pages, but this kernel's VM pages are 16 KiB (PAGE_RATIO 4) and
+# pmap_enter needs a 16 KiB aligned VA, so 3 of 4 indices panic. Which index
+# random() gives there evidently depends on the boot (always aligned so far
+# at 512 MiB). Pick only VM-page-aligned slots.
+edit('osfmk/arm/pmap/pmap.c', [
+    ('\t\tint text_leaf_index = random() % num_ptes;\n',
+     '#if defined(ARM64_BOARD_CONFIG_A5XELTE)\n'
+     '\t\tint text_leaf_index = (int)((random() % (num_ptes / PAGE_RATIO)) * PAGE_RATIO);\n'
+     '#else\n'
+     '\t\tint text_leaf_index = random() % num_ptes;\n'
+     '#endif\n', 1),
+])

@@ -648,6 +648,22 @@ launchd logs, because the loader's pmsg copy is overwritten by the kernel):
   VGF0's IDMA_CFG_ERR_STATE reads 0x10 (IMG_HEIGHT_ROTATION) before and
   after; it does not stop the fetch.
 
+### 2 GiB RAM works (2026-10-23 night)
+
+- c22: "S8 BT" backtrace of the write_pte_fast panic: kernel_bootstrap_thread
+  -> vm_commpage_init -> commpage_populate -> pmap_create_commpages ->
+  pmap_enter_options_addr -> pmap_enter_pte. The commpage text VA is a random
+  4 KiB leaf index; with 16 KiB VM pages pmap_enter needs a 16 KiB aligned VA.
+  0124 picks only PAGE_RATIO-aligned slots. (The early-panic reset brought
+  c21/c22 back to TWRP in ~35 s.)
+- **c23a/b/c (2 GiB, same image three times): all booted, ran the full
+  200 s and restarted cleanly ("Restart total" 915-970 ms).**
+- **BOOT is now `s8-daily-d-boot.img`** (SHA-256 754ea3b8...a484, read back
+  from sda7): 2 GiB RAM, A53 1690 / Mongoose 1703 MHz, CPU scaling path (no
+  DPP yet), no autoreset, no watchdog. Not yet tried by hand.
+- Next: the user looks at a DPP boot (c20 image settings) to confirm the
+  picture; then DPP goes into the daily image.
+
 ## Open work
 
 1. Boot the latest kernel/loader: does the frame-done copy remove the tearing,
