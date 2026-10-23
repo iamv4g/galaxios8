@@ -717,6 +717,32 @@ now come before the loader's probes. c29 (2 GiB daily kernel + probe):
   RAM (loader, MMU off, physical addresses; watchdog as safety net).
   Before that: list the r0p0 errata workarounds Linux panfrost/kbase apply.
 
+### GPU milestone 1b: the Mali runs a job (c30b, 2026-10-23)
+
+Loader `s8gpuprobe=2` (`pmic.c gpu_job_test`; the record replaces `s8acpm=`
+on the line, which is 608 bytes: c30 lost its record to that limit, iOS
+booted normally after the test). Sequence from Linux panfrost (registers
+`panfrost_regs.h`, G71 r0p0 = 05dev0: errata TMIX_8463, TMIX_8438,
+T76X_3953 -> TILER_CONFIG clock-gate override; nothing else needed for a
+job): soft reset, L2 -> shaders -> tiler power-up, AS 0, WRITE_VALUE job
+(Mesa genxml v6) on slot 0, polled. Own Mali-LPAE page tables (4 levels,
+4K; table entry 3, leaf 1 | AF | RW | outer shareable; MEMATTR 0x888d88;
+TRANSTAB | READ_INNER | ADRMODE_TABLE, TRANSCFG 0 = legacy) in free low DRAM
+at 0xd5000000. c30b record:
+
+- reset RAWSTAT 0x100; COHERENCY_FEATURES 0 (no ACE: non-coherent GPU);
+  L2_READY 1, **SHADER_READY 0x17771777 (all 20 cores)**, TILER_READY 1.
+- Job A, AS 0 in identity mode (ADRMODE 2): JOB_INT_RAWSTAT 0x10000,
+  JS_STATUS 0x42 JOB_READ_FAULT. Identity mode is not usable; tables needed.
+- **Job B through our page tables: JOB_INT_RAWSTAT 1 (done), header
+  exception status 1 (DONE), 0xc0ffee02 in the mapped PA page, 0 at the
+  identity address of the VA**; no MMU/GPU fault. Power-down clean.
+- Next (milestone 2): the same in XNU (a Mali block in the S8 patch: power
+  via pmucal + ACPM dvfs_g3d, IRQs 59-61 or polling, per-context page tables
+  from wired memory), then an IOKit user client with panfrost's UAPI
+  (CREATE_BO, MMAP_BO, SUBMIT, WAIT_BO, GET_PARAM, GET_BO_OFFSET) so Mesa
+  Panfrost can run on a Darwin `pan_kmod` + libdrm stand-in.
+
 ## Open work
 
 1. Boot the latest kernel/loader: does the frame-done copy remove the tearing,

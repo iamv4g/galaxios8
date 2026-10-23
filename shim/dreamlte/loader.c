@@ -637,12 +637,16 @@ uint64_t dl_main(uintptr_t dtb, uint64_t el, uint64_t sctlr)
 	rtc_bootarg(ba, pmic_init(kv, out));
 	/* s8lit=<kHz>: A53 clock (S-Boot leaves 1053 MHz; levels in pmic.c). */
 	acpm_cpu_clocks(cmdline_u32(p->cmdline, "s8lit"), acpm_word);
-	append_bootarg(ba, " s8acpm=", acpm_line, acpm_len);
+	/* The job test's record needs the room (BOOT_LINE_LENGTH): no s8acpm then. */
+	uint32_t gpuprobe = cmdline_u32(p->cmdline, "s8gpuprobe");
+	if (gpuprobe < 2)
+		append_bootarg(ba, " s8acpm=", acpm_line, acpm_len);
 	/* s8gpuprobe=1: power the Mali-G71 domain, read its ID registers, power
-	 * it off again (pmic.c gpu_probe); results as " s8gpu=". */
-	if (cmdline_u32(p->cmdline, "s8gpuprobe")) {
+	 * it off again (pmic.c gpu_probe); s8gpuprobe=2 runs two WRITE_VALUE
+	 * jobs instead of the ID dump (gpu_job_test). Results as " s8gpu=". */
+	if (gpuprobe) {
 		acpm_len = 0;
-		gpu_probe(acpm_word);
+		gpu_probe(acpm_word, gpuprobe >= 2);
 		append_bootarg(ba, " s8gpu=", acpm_line, acpm_len);
 	}
 	clean(ba_pa, ba_pa + PAGE_SIZE);

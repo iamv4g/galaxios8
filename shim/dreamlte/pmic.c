@@ -464,7 +464,195 @@ static int wait_bits(uintptr_t a, uint32_t mask, uint32_t want, unsigned us)
 	return (rd(a) & mask) == want;
 }
 
-void gpu_probe(void (*rec)(uint32_t))
+/*
+ * GPU milestone 1b: one job on the Mali. Register layout from the Bifrost
+ * GPU_CONTROL / JOB_CONTROL / MMU blocks (Linux panfrost_regs.h), sequence as
+ * panfrost does it: soft reset (GPU_CMD 1, wait RESET_COMPLETED in
+ * GPU_INT_RAWSTAT), TILER_CONFIG clock-gate override (G71 r0p0 erratum
+ * T76X_3953), L2 -> shaders -> tiler power-up, then address space 0 and a job
+ * chain on slot 0 (JS_HEAD_NEXT, JS_AFFINITY_NEXT = SHADER_PRESENT,
+ * JS_CONFIG_NEXT = AS 0 | thread priority 8 | flush clean+invalidate at start
+ * and end, JS_COMMAND_NEXT = START), polled through JOB_INT_RAWSTAT.
+ *
+ * The job is a WRITE_VALUE job (Mesa genxml v6.xml "Write Value Job": the
+ * 32-byte job header with Is 64b, Type 2, Index 1, then the payload: address,
+ * type 6 = immediate 32, value). Run twice:
+ *  A: AS 0 in identity mode (TRANSTAB ADRMODE 2), writes GPU_T_A physically.
+ *  B: AS 0 through our own Mali-LPAE page tables (4 levels, 4K, table entry 3,
+ *     leaf 1 | AF | RW | outer shareable, MEMATTR 0x888d88 as panfrost):
+ *     VA GPU_JOBS identity, VA GPU_VA_B -> PA GPU_T_B, so the value must land
+ *     in GPU_T_B and not at the identity address of GPU_VA_B.
+ * Buffers in free low DRAM (0xd1400000-0xe3c00000, TWRP DT reserved-memory);
+ * the loader runs with the MMU off, so the CPU side needs no cache work.
+ */
+#define GPU_INT_RAWSTAT		0x020
+#define GPU_CMD			0x030
+#define GPU_FAULTSTATUS		0x03c
+#define TILER_CONFIG		0xf08
+#define COHERENCY_FEAT		0x300
+#define COHERENCY_EN		0x304
+#define SHADER_READY		0x140
+#define TILER_READY		0x150
+#define L2_READY		0x160
+#define SHADER_PWRON		0x180
+#define TILER_PWRON		0x190
+#define L2_PWRON		0x1a0
+#define SHADER_PWROFF		0x1c0
+#define TILER_PWROFF		0x1d0
+#define L2_PWROFF		0x1e0
+#define L2_PWRTRANS		0x220
+#define JOB_INT_RAWSTAT		0x1000
+#define JOB_INT_CLEAR		0x1004
+#define JS0			0x1800
+#define JS_STATUS		0x24
+#define JS_HEAD_NEXT		0x40
+#define JS_AFFINITY_NEXT	0x50
+#define JS_CONFIG_NEXT		0x58
+#define JS_COMMAND_NEXT		0x60
+#define MMU_INT_RAWSTAT		0x2000
+#define MMU_INT_CLEAR		0x2004
+#define AS0			0x2400
+#define AS_TRANSTAB		0x00
+#define AS_MEMATTR		0x08
+#define AS_LOCKADDR		0x10
+#define AS_COMMAND		0x18
+#define AS_FAULTSTATUS		0x1c
+#define AS_FAULTADDR		0x20
+#define AS_STATUS		0x28
+#define AS_TRANSCFG		0x30
+
+#define GPU_MEM			0xd5000000UL	/* L0, L1, L2, L3 tables */
+#define GPU_JOBS		(GPU_MEM + 0x4000)
+#define GPU_T_A			(GPU_MEM + 0x5000)
+#define GPU_T_B			(GPU_MEM + 0x6000)
+#define GPU_VA_B		(GPU_MEM + 0x100000)	/* same 2 MiB as the tables */
+#define LPAE_TABLE		3UL
+#define LPAE_PAGE		(1UL | 1UL << 10 | 3UL << 6 | 2UL << 8)
+
+static inline void wr64(uintptr_t a, uint64_t v) { *(volatile uint64_t *)a = v; }
+
+static void as_cmd(uint32_t cmd)
+{
+	wait_bits(MALI + AS0 + AS_STATUS, 1, 0, 100000);
+	wr(MALI + AS0 + AS_COMMAND, cmd);
+	wait_bits(MALI + AS0 + AS_STATUS, 1, 0, 100000);
+}
+
+/* Soft reset and power-up; returns GPU_INT_RAWSTAT after the reset. */
+static uint32_t mali_up(void)
+{
+	wr(MALI + GPU_INT_RAWSTAT + 4, 0xffffffffU);	/* GPU_INT_CLEAR */
+	wr(MALI + GPU_CMD, 1);
+	wait_bits(MALI + GPU_INT_RAWSTAT, 1U << 8, 1U << 8, 10000);
+	uint32_t raw = rd(MALI + GPU_INT_RAWSTAT);
+	wr(MALI + GPU_INT_RAWSTAT + 4, 0xffffffffU);
+	wr(MALI + TILER_CONFIG, rd(MALI + TILER_CONFIG) | 1);
+	wr(MALI + L2_PWRON, rd(MALI + 0x120));
+	wait_bits(MALI + L2_READY, 0xffffffffU, rd(MALI + 0x120), 20000);
+	wr(MALI + SHADER_PWRON, rd(MALI + 0x100));
+	wait_bits(MALI + SHADER_READY, 0xffffffffU, rd(MALI + 0x100), 20000);
+	wr(MALI + TILER_PWRON, rd(MALI + 0x110));
+	wait_bits(MALI + TILER_READY, 0xffffffffU, rd(MALI + 0x110), 20000);
+	return raw;
+}
+
+static void as_setup(uint64_t transtab)
+{
+	wr(MALI + MMU_INT_CLEAR, 0xffffffffU);
+	wr(MALI + AS0 + AS_LOCKADDR, 63);		/* whole VA range */
+	wr(MALI + AS0 + AS_LOCKADDR + 4, 0);
+	as_cmd(2);					/* LOCK */
+	as_cmd(5);					/* FLUSH_MEM */
+	wr(MALI + AS0 + AS_TRANSCFG, 0);		/* legacy (LPAE) mode */
+	wr(MALI + AS0 + AS_TRANSCFG + 4, 0);
+	wr(MALI + AS0 + AS_TRANSTAB, (uint32_t)transtab);
+	wr(MALI + AS0 + AS_TRANSTAB + 4, (uint32_t)(transtab >> 32));
+	wr(MALI + AS0 + AS_MEMATTR, 0x00888d88U);
+	wr(MALI + AS0 + AS_MEMATTR + 4, 0);
+	as_cmd(1);					/* UPDATE */
+}
+
+static void write_value_job(uintptr_t job, uint64_t va, uint32_t value)
+{
+	for (int i = 0; i < 16; i++)
+		wr(job + 4 * i, 0);
+	wr(job + 16, 1U | 2U << 1 | 1U << 16);		/* Is 64b, Write value, index 1 */
+	wr64(job + 32, va);
+	wr(job + 40, 6);				/* Immediate 32 */
+	wr(job + 48, value);
+}
+
+/* Runs the chain at jc on slot 0; records JOB_INT_RAWSTAT and JS_STATUS. */
+static void run_job(uint64_t jc, void (*rec)(uint32_t))
+{
+	__asm__ volatile("dsb sy" ::: "memory");
+	wr(MALI + JOB_INT_CLEAR, 0xffffffffU);
+	wr(MALI + JS0 + JS_HEAD_NEXT, (uint32_t)jc);
+	wr(MALI + JS0 + JS_HEAD_NEXT + 4, (uint32_t)(jc >> 32));
+	wr(MALI + JS0 + JS_AFFINITY_NEXT, rd(MALI + 0x100));
+	wr(MALI + JS0 + JS_AFFINITY_NEXT + 4, 0);
+	wr(MALI + JS0 + JS_CONFIG_NEXT, 0 | 8U << 16 | 3U << 8 | 3U << 12);
+	wr(MALI + JS0 + JS_COMMAND_NEXT, 1);		/* START */
+	uint64_t end = ticks() + TIMER_HZ / 10;
+	while (ticks() < end && !(rd(MALI + JOB_INT_RAWSTAT) & 0x10001))
+		;
+	rec(rd(MALI + JOB_INT_RAWSTAT));
+	rec(rd(MALI + JS0 + JS_STATUS));
+}
+
+static void gpu_job_test(void (*rec)(uint32_t))
+{
+	rec(rd(MALI + COHERENCY_FEAT) << 16 | (rd(MALI + COHERENCY_EN) & 0xffff));
+
+	/* A: identity address space */
+	wr(GPU_T_A + 0x10, 0);
+	write_value_job(GPU_JOBS, GPU_T_A + 0x10, 0xc0ffee01U);
+	rec(mali_up());
+	rec(rd(MALI + L2_READY));
+	rec(rd(MALI + SHADER_READY));
+	rec(rd(MALI + TILER_READY));
+	as_setup(2);					/* ADRMODE_IDENTITY */
+	rec(0xa1);
+	run_job(GPU_JOBS, rec);
+	rec(rd(GPU_T_A + 0x10));
+	rec(rd(GPU_JOBS));				/* job exception status */
+	rec(rd(MALI + MMU_INT_RAWSTAT));
+	kv("job A", rd(GPU_T_A + 0x10));
+
+	/* B: our page tables */
+	for (uintptr_t a = GPU_MEM; a < GPU_MEM + 0x4000; a += 8)
+		wr64(a, 0);
+	wr64(GPU_MEM + 8 * 0, (GPU_MEM + 0x1000) | LPAE_TABLE);
+	wr64(GPU_MEM + 0x1000 + 8 * ((GPU_MEM >> 30) & 0x1ff), (GPU_MEM + 0x2000) | LPAE_TABLE);
+	wr64(GPU_MEM + 0x2000 + 8 * ((GPU_MEM >> 21) & 0x1ff), (GPU_MEM + 0x3000) | LPAE_TABLE);
+	wr64(GPU_MEM + 0x3000 + 8 * ((GPU_JOBS >> 12) & 0x1ff), GPU_JOBS | LPAE_PAGE);
+	wr64(GPU_MEM + 0x3000 + 8 * ((GPU_VA_B >> 12) & 0x1ff), GPU_T_B | LPAE_PAGE);
+	wr(GPU_T_B + 0x10, 0);
+	wr(GPU_VA_B + 0x10, 0);
+	write_value_job(GPU_JOBS + 0x40, GPU_VA_B + 0x10, 0xc0ffee02U);
+	mali_up();
+	as_setup(GPU_MEM | 4 | 3);			/* READ_INNER, ADRMODE_TABLE */
+	rec(0xb1);
+	run_job(GPU_JOBS + 0x40, rec);
+	rec(rd(GPU_T_B + 0x10));
+	rec(rd(GPU_VA_B + 0x10));			/* must stay 0 */
+	rec(rd(GPU_JOBS + 0x40));
+	rec(rd(MALI + MMU_INT_RAWSTAT));
+	rec(rd(MALI + AS0 + AS_FAULTSTATUS));
+	rec(rd(MALI + AS0 + AS_FAULTADDR));
+	rec(rd(MALI + GPU_FAULTSTATUS));
+	kv("job B", rd(GPU_T_B + 0x10));
+
+	/* power down again before g3d_off */
+	as_setup(0);
+	wr(MALI + SHADER_PWROFF, rd(MALI + 0x100));
+	wr(MALI + TILER_PWROFF, rd(MALI + 0x110));
+	delay_us(100);
+	wr(MALI + L2_PWROFF, rd(MALI + 0x120));
+	wait_bits(MALI + L2_PWRTRANS, 0xffffffffU, 0, 20000);
+}
+
+void gpu_probe(void (*rec)(uint32_t), int jobs)
 {
 	out("G3D probe\n");
 	rec(rd(PMU_G3D_STAT));
@@ -492,12 +680,17 @@ void gpu_probe(void (*rec)(uint32_t))
 			0x000, 0x004, 0x008, 0x00c, 0x010, 0x014, 0x018, 0x01c,
 			0x100, 0x110, 0x120,
 		};
-		rec(0x3a1);			/* marker: Mali registers follow */
-		for (unsigned i = 0; i < sizeof(regs) / sizeof(regs[0]); i++)
-			rec(rd(MALI + regs[i]));
 		kv("GPU_ID", rd(MALI));
 		kv("shaders", rd(MALI + 0x100));
 		out("\n");
+		if (jobs) {
+			rec(0x3b1);		/* marker: job test follows */
+			gpu_job_test(rec);
+		} else {
+			rec(0x3a1);		/* marker: Mali registers follow */
+			for (unsigned i = 0; i < sizeof(regs) / sizeof(regs[0]); i++)
+				rec(rd(MALI + regs[i]));
+		}
 	}
 	/* g3d_off */
 	wr(PMU_G3D_CONF, rd(PMU_G3D_CONF) & ~0xfU);

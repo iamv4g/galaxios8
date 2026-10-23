@@ -12,4 +12,4 @@ uint64_t pmic_init(void (*kv)(const char *, uint64_t), void (*out)(const char *)
 void acpm_cpu_clocks(uint32_t lit_khz, void (*rec)(uint32_t));
 
 /* Mali-G71 power-up probe (ID registers), then power-off; rec gets words. */
-void gpu_probe(void (*rec)(uint32_t));
+void gpu_probe(void (*rec)(uint32_t), int jobs);
