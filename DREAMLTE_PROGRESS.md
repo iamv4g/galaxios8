@@ -689,6 +689,34 @@ All 2 GiB + `sweetfb_dpp=1`, user at the phone with videos.
   (IDMA_CHAN_CONTROL/DATA) around a flip. DPP stays off in the daily image.
 - BOOT goes back to `s8-daily-d-boot.img` after c28 (2 GiB, CPU scaling).
 
+### GPU milestone 1a: the Mali answers (c29, 2026-10-23)
+
+Prior art studied: HackiOS (github.com/oosexgang, cloned read-only into the
+git-ignored `research/hackios/`): Adreno bring-up `redwood_adreno.c`
+(~4.1k lines) + `RedwoodGPU.cpp` (msm DRM ioctls as an IOKit user client),
+Mesa 25.0.7 with a libdrm stand-in (`tools/mesa/freedreno-darwin.patch`,
+`redwood-drm`), `eagl.c` (EAGLContext replacement on OSMesa) injected into
+backboardd (`inject.c`). For the S8: their Mesa/EAGL layers carry over with
+Panfrost instead of freedreno (Mesa's `pan_kmod` is the place for a Darwin
+backend); the kernel GPU driver is ours to write.
+
+Loader `s8gpuprobe=1` (`pmic.c gpu_probe`, results as boot-arg `s8gpu=`):
+Samsung's pmucal `g3d_on` sequence, ACPM `dvfs_g3d` (id 4) 260 MHz request,
+Mali GPU_CONTROL reads, `g3d_off`. The reset-reason preset and the watchdog
+now come before the loader's probes. c29 (2 GiB daily kernel + probe):
+
+- G3D domain already on when the loader starts (PMU 0x164840e4 = 0x3000f);
+  PLL_G3D 0xa0a00412 = 260 MHz; ACPM G3D request rc 0; power-off worked.
+- **GPU_ID 0x60a00001: Mali-G71 (product 0x6000), r0p0** (earliest silicon,
+  many kbase/panfrost errata). SHADER_PRESENT 0x17771777 = **20 cores
+  (MP20)**, L2_PRESENT 1, TILER_PRESENT 1, JS_PRESENT 0x7, AS_PRESENT 0xff,
+  L2_FEATURES 0x07130206, TILER_FEATURES 0x809, MEM_FEATURES 0x301,
+  MMU_FEATURES 0x2830, CORE_FEATURES 0.
+- Next (1b): power L2 + shader cores, one MMU address space with a small
+  page table, submit a WRITE_VALUE job on job slot 0 and check the word in
+  RAM (loader, MMU off, physical addresses; watchdog as safety net).
+  Before that: list the r0p0 errata workarounds Linux panfrost/kbase apply.
+
 ## Open work
 
 1. Boot the latest kernel/loader: does the frame-done copy remove the tearing,

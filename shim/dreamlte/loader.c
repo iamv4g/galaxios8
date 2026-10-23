@@ -603,29 +603,8 @@ uint64_t dl_main(uintptr_t dtb, uint64_t el, uint64_t sctlr)
 		zero(UFS_PROBE_DMA, UFS_PROBE_DMA_SIZE);
 		clean(UFS_PROBE_DMA, UFS_PROBE_DMA + UFS_PROBE_DMA_SIZE);
 	}
-	rtc_bootarg(ba, pmic_init(kv, out));
-	/* s8lit=<kHz>: A53 clock (S-Boot leaves 1053 MHz; levels in pmic.c). */
-	acpm_cpu_clocks(cmdline_u32(p->cmdline, "s8lit"), acpm_word);
-	append_bootarg(ba, " s8acpm=", acpm_line, acpm_len);
-	clean(ba_pa, ba_pa + PAGE_SIZE);
-	touch_probe(kv, out);
-	battery_probe(kv, out);
-	display_probe(kv, out);
-#if MNGS_DIAG
-	mngs_cycle(ba);
-	clean(ba_pa, ba_pa + PAGE_SIZE);
-#else
-	/* mngs_probe powered Mongoose core 0x000 by hand (upstream boot 31);
-	 * since boot m8 XNU starts the cores with plain PSCI CPU_ON once the GIC
-	 * distributor is on, and a core left powered here would only get in the
-	 * way. */
-	(void)mngs_probe;
-#endif
-	/* smp_probe(kv, out) proved the PMU power-up (boot 19); it leaves the
-	 * probed cores' PMU power on, which hid the 0 -> 0xF edge XNU needs. */
-	(void)smp_probe;
-	/* Test boots (s8autoreset): any reset from here on, including a hang
-	 * ended by the user's forced restart, should land in TWRP. Samsung's
+	/* Test boots (s8autoreset): any reset from here on (a hang in a probe
+	 * below or in XNU, the user's forced restart) should land in TWRP. Samsung's
 	 * reset reason, as s8_halt_restart writes it (INFORM2 POWER_RESET,
 	 * INFORM3 RECOVERY); XNU's own clean restart overwrites it. */
 	if (cmdline_u32(p->cmdline, "s8autoreset")) {
@@ -655,6 +634,34 @@ uint64_t dl_main(uintptr_t dtb, uint64_t el, uint64_t sctlr)
 		kv("watchdog s", count / 793U);
 		out("\n");
 	}
+	rtc_bootarg(ba, pmic_init(kv, out));
+	/* s8lit=<kHz>: A53 clock (S-Boot leaves 1053 MHz; levels in pmic.c). */
+	acpm_cpu_clocks(cmdline_u32(p->cmdline, "s8lit"), acpm_word);
+	append_bootarg(ba, " s8acpm=", acpm_line, acpm_len);
+	/* s8gpuprobe=1: power the Mali-G71 domain, read its ID registers, power
+	 * it off again (pmic.c gpu_probe); results as " s8gpu=". */
+	if (cmdline_u32(p->cmdline, "s8gpuprobe")) {
+		acpm_len = 0;
+		gpu_probe(acpm_word);
+		append_bootarg(ba, " s8gpu=", acpm_line, acpm_len);
+	}
+	clean(ba_pa, ba_pa + PAGE_SIZE);
+	touch_probe(kv, out);
+	battery_probe(kv, out);
+	display_probe(kv, out);
+#if MNGS_DIAG
+	mngs_cycle(ba);
+	clean(ba_pa, ba_pa + PAGE_SIZE);
+#else
+	/* mngs_probe powered Mongoose core 0x000 by hand (upstream boot 31);
+	 * since boot m8 XNU starts the cores with plain PSCI CPU_ON once the GIC
+	 * distributor is on, and a core left powered here would only get in the
+	 * way. */
+	(void)mngs_probe;
+#endif
+	/* smp_probe(kv, out) proved the PMU power-up (boot 19); it leaves the
+	 * probed cores' PMU power on, which hid the 0 -> 0xF edge XNU needs. */
+	(void)smp_probe;
 	fg = 0xff40ff40U;
 	out("\nJUMP TO XNU\n");
 	reserve_marker();

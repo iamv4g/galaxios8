@@ -224,6 +224,7 @@ extern const uint8_t acpm_dvfs_fw[], acpm_dvfs_fw_end[];
 
 static void (*acpm_rec)(uint32_t);
 static unsigned acpm_seq;
+static int acpm_ready;			/* DVFS plugin attached */
 
 static int sram_off_ok(uint32_t off, uint32_t len)
 {
@@ -396,6 +397,7 @@ void acpm_cpu_clocks(uint32_t lit_khz, void (*rec)(uint32_t))
 		ok |= lit_levels[i] == lit_khz;
 	uintptr_t c = acpm_channel(ACPM_CH_DVFS);
 	int rc = ok && c ? acpm_load_dvfs() : -14;
+	acpm_ready = rc == 0;
 	kv("load rc", (uint32_t)rc);
 	out("\n");
 	acpm_rec(0xacc);			/* marker: results follow */
@@ -430,4 +432,78 @@ void acpm_cpu_clocks(uint32_t lit_khz, void (*rec)(uint32_t))
 	kv("pll MHz", cl1_pll_mhz());
 	cpu_freq();
 	out("\n");
+}
+
+/*
+ * G3D (Mali-G71 MP20, DT mali@13900000) probe, the first GPU milestone:
+ * power the domain with Samsung's pmucal sequence (pmucal_local_exynos8895.h
+ * g3d_on: CMU_G3D PLL_CON2 = 0x30000003, PLL_CON0 bit 4, MUX_CLKCMU_EMBEDDED_
+ * G3D_USER bit 4; PMU EMBEDDED_G3D_CONFIGURATION 0x40e0 = 0xf, wait STATUS
+ * 0x40e4), ask ACPM for the lowest G3D level (dvfs_g3d = ACPM id 4,
+ * 260 MHz in the DT's gpu_dvfs_table), read the Mali ID and "present"
+ * registers (Bifrost GPU_CONTROL: GPU_ID 0x000, L2_FEATURES 0x004,
+ * CORE_FEATURES 0x008, TILER_FEATURES 0x00c, MEM_FEATURES 0x010,
+ * MMU_FEATURES 0x014, AS_PRESENT 0x018, JS_PRESENT 0x01c, SHADER_PRESENT_LO
+ * 0x100, TILER_PRESENT_LO 0x110, L2_PRESENT_LO 0x120), then g3d_off.
+ */
+#define CMU_G3D			0x13800000UL
+#define G3D_PLL_CON0		(CMU_G3D + 0x140)
+#define G3D_PLL_CON2		(CMU_G3D + 0x148)
+#define G3D_MUX_USER		(CMU_G3D + 0x100)
+#define PMU_G3D_CONF		0x164840e0UL
+#define PMU_G3D_STAT		0x164840e4UL
+#define MALI			0x13900000UL
+#define DVFS_G3D		4
+
+static int wait_bits(uintptr_t a, uint32_t mask, uint32_t want, unsigned us)
+{
+	uint64_t end = ticks() + TIMER_HZ / 1000000 * us;
+	while (ticks() < end)
+		if ((rd(a) & mask) == want)
+			return 1;
+	return (rd(a) & mask) == want;
+}
+
+void gpu_probe(void (*rec)(uint32_t))
+{
+	out("G3D probe\n");
+	rec(rd(PMU_G3D_STAT));
+	rec(rd(G3D_PLL_CON0));
+	rec(rd(G3D_PLL_CON2));
+	rec(rd(G3D_MUX_USER));
+	wr(G3D_PLL_CON2, 0x30000003U);
+	wr(G3D_PLL_CON0, rd(G3D_PLL_CON0) | (1U << 4));
+	wr(G3D_MUX_USER, rd(G3D_MUX_USER) | (1U << 4));
+	wr(PMU_G3D_CONF, (rd(PMU_G3D_CONF) & ~0xfU) | 0xfU);
+	int on = wait_bits(PMU_G3D_STAT, 0xf, 0xf, 10000);
+	rec(rd(PMU_G3D_STAT));
+	kv("g3d on", (uint64_t)on);
+	if (on) {
+		if (acpm_ready) {
+			uint32_t ans = 0;
+			uintptr_t c = acpm_channel(ACPM_CH_DVFS);
+			int rc = c ? acpm_freq(c, DVFS_G3D, FREQ_REQ, 260000, &ans) : -14;
+			rec(0xf00);		/* marker: ACPM G3D request rc */
+			rec((uint32_t)rc);
+		}
+		delay_us(200);
+		rec(rd(G3D_PLL_CON0));
+		static const uint16_t regs[] = {
+			0x000, 0x004, 0x008, 0x00c, 0x010, 0x014, 0x018, 0x01c,
+			0x100, 0x110, 0x120,
+		};
+		rec(0x3a1);			/* marker: Mali registers follow */
+		for (unsigned i = 0; i < sizeof(regs) / sizeof(regs[0]); i++)
+			rec(rd(MALI + regs[i]));
+		kv("GPU_ID", rd(MALI));
+		kv("shaders", rd(MALI + 0x100));
+		out("\n");
+	}
+	/* g3d_off */
+	wr(PMU_G3D_CONF, rd(PMU_G3D_CONF) & ~0xfU);
+	int off = wait_bits(PMU_G3D_STAT, 0xf, 0, 10000);
+	wr(G3D_MUX_USER, rd(G3D_MUX_USER) & ~(1U << 4));
+	wr(G3D_PLL_CON0, rd(G3D_PLL_CON0) & ~(1U << 4));
+	wr(G3D_PLL_CON2, 0x10000001U);
+	rec((uint32_t)off);
 }
