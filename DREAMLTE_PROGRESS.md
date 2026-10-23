@@ -867,6 +867,10 @@ libOSMesa has install name @executable_path.
   root edit first skipped all 7 chunks because a progress file of the earlier
   manifest was still there; `edit-live-root.sh` now deletes it, and the 7
   chunks were then written and verified.
+- c35 (0124 with the B_PHYS fix): **no panic; s8drop read the zone**
+  (report 300: 2 files, 0xf5e5d0 bytes) through /dev/rufsroot0, then was
+  itself killed by jetsam (per-process limit) copying the 16 MB dylib in one
+  malloc. s8drop now raises its limit and copies in 1 MiB pieces.
 
 ## Open work
 

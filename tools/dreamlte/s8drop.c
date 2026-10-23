@@ -13,6 +13,9 @@
  * the kernel log through the S8Mali Report selector ("S8 MALI: s8drop report N"):
  *   300  zone found: count, total bytes      301  no zone (bad magic): first word read
  *   302  run: index, exit status (wait status)  303  failed to write or spawn: index, errno
+ *   304  memorystatus_control (jetsam limit 1 GiB): return value, errno
+ * launchd jobs get a small jetsam limit (c35: s8drop killed copying a 16 MB file in one
+ * piece), so the limit is raised first and files are copied in 1 MiB pieces.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -42,6 +45,9 @@ extern kern_return_t IOObjectRelease(io_object_t object);
 extern kern_return_t IOConnectCallScalarMethod(io_connect_t connection, uint32_t selector,
     const uint64_t *input, uint32_t inputCnt, uint64_t *output, uint32_t *outputCnt);
 extern char **environ;
+extern int memorystatus_control(uint32_t command, int32_t pid, uint32_t flags, void *buffer, size_t size);
+#define MEMORYSTATUS_CMD_SET_JETSAM_TASK_LIMIT 6
+#define PIECE (1ULL << 20)
 
 struct entry {
 	char name[48];
@@ -93,6 +99,8 @@ main(void)
 		IOServiceOpen(svc, mach_task_self(), 0, &conn);
 		IOObjectRelease(svc);
 	}
+	int mrc = memorystatus_control(MEMORYSTATUS_CMD_SET_JETSAM_TASK_LIMIT, getpid(), 1024, NULL, 0);
+	report(304, (uint64_t)(int64_t)mrc, mrc ? errno : 0);
 	int fd = open("/dev/rufsroot0", O_RDONLY);
 	static char hdr[4096];
 	if (fd < 0 || zread(fd, 0, hdr, sizeof(hdr)) != 0 || memcmp(hdr, "S8DROP01", 8) != 0) {
@@ -121,11 +129,18 @@ main(void)
 			report(303, i, EINVAL);
 			continue;
 		}
-		char *data = malloc(e[i].size ? e[i].size : 1);
+		char *data = malloc(PIECE);
 		int out = data ? open(e[i].name, O_WRONLY | O_CREAT | O_TRUNC, 0755) : -1;
-		if (out < 0 || zread(fd, e[i].offset, data, e[i].size) != 0 ||
-		    write(out, data, e[i].size) != (ssize_t)e[i].size) {
+		if (out < 0) {
 			report(303, i, errno);
+		}
+		for (uint64_t done = 0; out >= 0 && done < e[i].size;) {
+			uint64_t n = e[i].size - done < PIECE ? e[i].size - done : PIECE;
+			if (zread(fd, e[i].offset + done, data, n) != 0 || write(out, data, n) != (ssize_t)n) {
+				report(303, i, errno);
+				break;
+			}
+			done += n;
 		}
 		if (out >= 0) {
 			fchmod(out, 0755);
