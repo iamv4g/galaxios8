@@ -2400,3 +2400,209 @@ edit('osfmk/arm/pmap/pmap.c', [
      '\t\tint text_leaf_index = random() % num_ptes;\n'
      '#endif\n', 1),
 ])
+
+# DPP without tearing (c24, user: picture right, faster, but tearing and
+# flicker when swiping the home screen; presenter copy 2 us instead of 9.4 ms).
+# Two causes: SFR_UPDATE_FORCE applies at once, so a flip that lands while
+# DECON sends a frame splits it; and with two stages the stage still being
+# scanned was handed back to the snapshot as soon as the flip was issued.
+# Now: mask DECON's hardware trigger (HW_SW_TRIG_CONTROL bit 4,
+# HW_TRIG_MASK_DECON, as decon_reg_set_trigger does), wait for
+# GLOBAL_CONTROL IDLE_STATUS (bit 5: the frame in flight is out), switch
+# the DMA base, unmask; and three stages, so the snapshot never writes the
+# shown one or the one being flipped to.
+edit('iokit/Kernel/arm/SweetFramebuffer.cpp', [
+    ('static uintptr_t sweet_fb_stages[2];\nstatic int sweet_fb_ready = -1, sweet_fb_busy = -1;\n',
+     'static uintptr_t sweet_fb_stages[3];\n'
+     'static int sweet_fb_ready = -1, sweet_fb_busy = -1;\n'
+     'static int sweet_fb_shown = -1;          /* DPP: the stage DECON scans */\n', 1),
+    ('static uint64_t sweet_fb_stage_phys[2] = { 0xd2000000ULL, 0xd3000000ULL };',
+     'static uint64_t sweet_fb_stage_phys[3] = { 0xd2000000ULL, 0xd3000000ULL, 0xd4000000ULL };', 1),
+    ('\tuint32_t pa = (uint32_t)sweet_fb_stage_phys[b];\n'
+     '\tS8_R(s8_vgf_dma, 0x40) = pa;                     /* IN_BASE_ADDR_Y */\n'
+     '\tS8_R(s8_vgf_dma, 0x44) = pa;                     /* IN_BASE_ADDR_C */\n'
+     '\t__asm__ volatile ("dsb sy" ::: "memory");\n'
+     '\tS8_R(s8_vgf_dma, 0) |= 1u << 4;                  /* SFR_UPDATE_FORCE */\n',
+     '\tuint32_t pa = (uint32_t)sweet_fb_stage_phys[b];\n'
+     '\tuint32_t trig = S8_R(s8_dpp_decon, 0x70);\n'
+     '\tS8_R(s8_dpp_decon, 0x70) = trig | (1u << 4);     /* HW_TRIG_MASK_DECON */\n'
+     '\tfor (int i = 0; i < 400 && !(S8_R(s8_dpp_decon, 0) & (1u << 5)); i++) {\n'
+     '\t\tIODelay(50);                       /* up to 20 ms for IDLE_STATUS */\n'
+     '\t}\n'
+     '\tS8_R(s8_vgf_dma, 0x40) = pa;                     /* IN_BASE_ADDR_Y */\n'
+     '\tS8_R(s8_vgf_dma, 0x44) = pa;                     /* IN_BASE_ADDR_C */\n'
+     '\t__asm__ volatile ("dsb sy" ::: "memory");\n'
+     '\tS8_R(s8_vgf_dma, 0) |= 1u << 4;                  /* SFR_UPDATE_FORCE */\n'
+     '\t__asm__ volatile ("dsb sy" ::: "memory");\n'
+     '\tS8_R(s8_dpp_decon, 0x70) = trig;\n', 1),
+    ('\t\tif (sweet_fb_dpp) {\n'
+     '\t\t\tsweet_fb_dpp_flip(b);\n',
+     '\t\tif (sweet_fb_dpp) {\n'
+     '\t\t\tsweet_fb_dpp_flip(b);\n'
+     '\t\t\tIOLockLock(sweet_fb_stage_lock);\n'
+     '\t\t\tsweet_fb_shown = b;\n'
+     '\t\t\tsweet_fb_busy = -1;\n'
+     '\t\t\tIOLockUnlock(sweet_fb_stage_lock);\n', 1),
+    ('\t\tuintptr_t stage = 0, stage2 = 0;\n',
+     '\t\tuintptr_t stage = 0, stage2 = 0, stage3 = 0;\n', 1),
+    ('\t\t\tif (stage2 != 0) {\n'
+     '\t\t\t\tbzero((void *)stage, (size_t)stage_bytes);\n'
+     '\t\t\t\tbzero((void *)stage2, (size_t)stage_bytes);\n',
+     '\t\t\tstage3 = stage2 ? (uintptr_t)ml_io_map_unmappable(sweet_fb_stage_phys[2], (vm_size_t)stage_bytes, VM_WIMG_WCOMB) : 0;\n'
+     '\t\t\tif (stage3 != 0) {\n'
+     '\t\t\t\tbzero((void *)stage, (size_t)stage_bytes);\n'
+     '\t\t\t\tbzero((void *)stage2, (size_t)stage_bytes);\n'
+     '\t\t\t\tbzero((void *)stage3, (size_t)stage_bytes);\n', 1),
+    ('\t\t\tsweet_fb_stages[1] = stage2;\n',
+     '\t\t\tsweet_fb_stages[1] = stage2;\n'
+     '\t\t\tsweet_fb_stages[2] = sweet_fb_dpp ? stage3 : 0;\n'
+     '\t\t\tsweet_fb_shown = sweet_fb_dpp ? 0 : -1;  /* sweet_fb_dpp_start shows stage 0 */\n', 1),
+    ('\t\tslot = sweet_fb_busy == 0 ? 1 : (sweet_fb_busy == 1 ? 0 : (sweet_fb_ready == 0 ? 1 : 0));\n',
+     '\t\tif (sweet_fb_dpp) {\n'
+     '\t\t\t/* any stage neither shown nor being flipped to; prefer one not ready */\n'
+     '\t\t\tfor (int i = 0; i < 3; i++) {\n'
+     '\t\t\t\tif (i != sweet_fb_busy && i != sweet_fb_shown) {\n'
+     '\t\t\t\t\tslot = i;\n'
+     '\t\t\t\t\tif (i != sweet_fb_ready) {\n'
+     '\t\t\t\t\t\tbreak;\n'
+     '\t\t\t\t\t}\n'
+     '\t\t\t\t}\n'
+     '\t\t\t}\n'
+     '\t\t} else {\n'
+     '\t\t\tslot = sweet_fb_busy == 0 ? 1 : (sweet_fb_busy == 1 ? 0 : (sweet_fb_ready == 0 ? 1 : 0));\n'
+     '\t\t}\n', 1),
+])
+
+# DPP flips, second try (c25, user video: a bright band or tear across the
+# top rows, sometimes the upper half): in command mode a 1440x2960 frame
+# takes most of the 16.7 ms to send, so the gap between frame done and the
+# next TE is short, and the presenter often masked the trigger only after
+# the next frame had started. Now the flip masks first, then waits only if a
+# frame is in flight (FRAME_START pending, FRAME_DONE not yet: INTERRUPT_PENDING
+# bits 12/13, sources enabled in INTERRUPT_ENABLE), switches, clears both
+# bits and unmasks. The presenter no longer waits for a frame done first in
+# DPP mode.
+edit('iokit/Kernel/arm/SweetFramebuffer.cpp', [
+    ('\tuint32_t trig = S8_R(s8_dpp_decon, 0x70);\n'
+     '\tS8_R(s8_dpp_decon, 0x70) = trig | (1u << 4);     /* HW_TRIG_MASK_DECON */\n'
+     '\tfor (int i = 0; i < 400 && !(S8_R(s8_dpp_decon, 0) & (1u << 5)); i++) {\n'
+     '\t\tIODelay(50);                       /* up to 20 ms for IDLE_STATUS */\n'
+     '\t}\n',
+     '\tuint32_t trig = S8_R(s8_dpp_decon, 0x70);\n'
+     '\tS8_R(s8_dpp_decon, 0x70) = trig | (1u << 4);     /* HW_TRIG_MASK_DECON */\n'
+     '\t__asm__ volatile ("dsb sy" ::: "memory");\n'
+     '\tuint32_t pend = S8_R(s8_dpp_decon, 0x4c);\n'
+     '\tif ((pend & (1u << 12)) && !(pend & (1u << 13))) {   /* a frame is being sent */\n'
+     '\t\tfor (int i = 0; i < 400 && !(S8_R(s8_dpp_decon, 0x4c) & (1u << 13)); i++) {\n'
+     '\t\t\tIODelay(50);\n'
+     '\t\t}\n'
+     '\t}\n', 1),
+    ('\tS8_R(s8_vgf_dma, 0) |= 1u << 4;                  /* SFR_UPDATE_FORCE */\n'
+     '\t__asm__ volatile ("dsb sy" ::: "memory");\n'
+     '\tS8_R(s8_dpp_decon, 0x70) = trig;\n',
+     '\tS8_R(s8_vgf_dma, 0) |= 1u << 4;                  /* SFR_UPDATE_FORCE */\n'
+     '\t__asm__ volatile ("dsb sy" ::: "memory");\n'
+     '\tS8_R(s8_dpp_decon, 0x4c) = (1u << 12) | (1u << 13);  /* clear start/done */\n'
+     '\tS8_R(s8_dpp_decon, 0x70) = trig;\n', 1),
+    ('\tuint32_t err_pre = S8_R(s8_vgf_dma, 0x870);\n',
+     '\tuint32_t err_pre = S8_R(s8_vgf_dma, 0x870);\n'
+     '\tS8_R(s8_dpp_decon, 0x40) |= (1u << 13) | (1u << 12) | 1u;  /* frame done/start sources */\n', 1),
+    ('\t\tuint64_t t0 = mach_absolute_time();\n'
+     '\t\tsweet_fb_wait_frame_done();\n'
+     '\t\tuint64_t t1 = mach_absolute_time();\n',
+     '\t\tuint64_t t0 = mach_absolute_time();\n'
+     '\t\tif (!sweet_fb_dpp) {\n'
+     '\t\t\tsweet_fb_wait_frame_done();\n'
+     '\t\t}\n'
+     '\t\tuint64_t t1 = mach_absolute_time();\n', 1),
+])
+
+# DPP flips, third try (c26: still a tear across the status bar). Masking the
+# trigger cannot help if the IDMA starts fetching the next frame's first lines
+# right after frame done, before the forced base switch: the top band then
+# comes from the old stage. Do what Samsung's driver does instead: write the
+# base without forcing and request window 0's shadow update
+# (SHADOW_REG_UPDATE_REQ bit 0), which DECON latches at the frame boundary;
+# the old stage stays "shown" until the request clears. Fallback after 40 ms:
+# SFR_UPDATE_FORCE (counted in s8_dpp_forced). Also the black flash when
+# opening the App Library: a stage used for the first time still held the
+# zeroed start; it now starts as a copy of the shown one.
+edit('iokit/Kernel/arm/SweetFramebuffer.cpp', [
+    ('\tuint32_t trig = S8_R(s8_dpp_decon, 0x70);\n'
+     '\tS8_R(s8_dpp_decon, 0x70) = trig | (1u << 4);     /* HW_TRIG_MASK_DECON */\n'
+     '\t__asm__ volatile ("dsb sy" ::: "memory");\n'
+     '\tuint32_t pend = S8_R(s8_dpp_decon, 0x4c);\n'
+     '\tif ((pend & (1u << 12)) && !(pend & (1u << 13))) {   /* a frame is being sent */\n'
+     '\t\tfor (int i = 0; i < 400 && !(S8_R(s8_dpp_decon, 0x4c) & (1u << 13)); i++) {\n'
+     '\t\t\tIODelay(50);\n'
+     '\t\t}\n'
+     '\t}\n'
+     '\tS8_R(s8_vgf_dma, 0x40) = pa;                     /* IN_BASE_ADDR_Y */\n'
+     '\tS8_R(s8_vgf_dma, 0x44) = pa;                     /* IN_BASE_ADDR_C */\n'
+     '\t__asm__ volatile ("dsb sy" ::: "memory");\n'
+     '\tS8_R(s8_vgf_dma, 0) |= 1u << 4;                  /* SFR_UPDATE_FORCE */\n'
+     '\t__asm__ volatile ("dsb sy" ::: "memory");\n'
+     '\tS8_R(s8_dpp_decon, 0x4c) = (1u << 12) | (1u << 13);  /* clear start/done */\n'
+     '\tS8_R(s8_dpp_decon, 0x70) = trig;\n',
+     '\tS8_R(s8_vgf_dma, 0x40) = pa;                     /* IN_BASE_ADDR_Y */\n'
+     '\tS8_R(s8_vgf_dma, 0x44) = pa;                     /* IN_BASE_ADDR_C */\n'
+     '\t__asm__ volatile ("dsb sy" ::: "memory");\n'
+     '\tS8_R(s8_dpp_decon, 0x60) |= 1u;                  /* window 0 shadow update */\n'
+     '\tfor (int i = 0; i < 800 && (S8_R(s8_dpp_decon, 0x60) & 1u); i++) {\n'
+     '\t\tIODelay(50);                       /* latched at the frame boundary */\n'
+     '\t}\n'
+     '\tif (S8_R(s8_dpp_decon, 0x60) & 1u) {\n'
+     '\t\tS8_R(s8_vgf_dma, 0) |= 1u << 4;          /* SFR_UPDATE_FORCE */\n'
+     '\t\tif ((s8_dpp_forced++ % 100) == 0) {\n'
+     '\t\t\tIOLog("S8 DPP: shadow update not latched in 40 ms, forced (%u)\\n", s8_dpp_forced);\n'
+     '\t\t}\n'
+     '\t}\n', 1),
+    ('static uint32_t s8_dpp_win0[8], s8_dpp_path0;\n',
+     'static uint32_t s8_dpp_win0[8], s8_dpp_path0;\n'
+     'static uint32_t s8_dpp_forced;\n'
+     'static bool s8_dpp_stage_used[3] = { true, false, false };\n', 1),
+    ('\tuintptr_t panel = slot >= 0 ? sweet_fb_stages[slot] : fPixels;\n',
+     '\tuintptr_t panel = slot >= 0 ? sweet_fb_stages[slot] : fPixels;\n'
+     '\tif (sweet_fb_dpp && slot >= 0 && !s8_dpp_stage_used[slot] && sweet_fb_shown >= 0) {\n'
+     '\t\tmemcpy((void *)panel, (const void *)sweet_fb_stages[sweet_fb_shown],\n'
+     '\t\t    (size_t)sweet_fb_stage_w * 4 * sweet_fb_stage_h);\n'
+     '\t\ts8_dpp_stage_used[slot] = true;\n'
+     '\t}\n', 1),
+])
+
+# DPP flips, fourth try. What the three earlier runs show, together: the
+# IDMA's base register is double-buffered and taken over at the DMA's own
+# frame boundary (when it finishes fetching a frame, before the next TE).
+# c25/c26 forced the switch after frame done, when the DMA had already
+# latched the old base and fetched ahead: top band from the old stage
+# ("tear at the status bar"). c27's DECON shadow request cleared at the
+# DECON frame start, a frame before the DMA left the old stage, which the
+# snapshot was then already overwriting: garbage in the top part. So: write
+# the base only, then wait for a frame done after the write (the old stage
+# is fully fetched and the DMA has moved on) before it is handed back.
+edit('iokit/Kernel/arm/SweetFramebuffer.cpp', [
+    ('\tS8_R(s8_vgf_dma, 0x40) = pa;                     /* IN_BASE_ADDR_Y */\n'
+     '\tS8_R(s8_vgf_dma, 0x44) = pa;                     /* IN_BASE_ADDR_C */\n'
+     '\t__asm__ volatile ("dsb sy" ::: "memory");\n'
+     '\tS8_R(s8_dpp_decon, 0x60) |= 1u;                  /* window 0 shadow update */\n'
+     '\tfor (int i = 0; i < 800 && (S8_R(s8_dpp_decon, 0x60) & 1u); i++) {\n'
+     '\t\tIODelay(50);                       /* latched at the frame boundary */\n'
+     '\t}\n'
+     '\tif (S8_R(s8_dpp_decon, 0x60) & 1u) {\n'
+     '\t\tS8_R(s8_vgf_dma, 0) |= 1u << 4;          /* SFR_UPDATE_FORCE */\n'
+     '\t\tif ((s8_dpp_forced++ % 100) == 0) {\n'
+     '\t\t\tIOLog("S8 DPP: shadow update not latched in 40 ms, forced (%u)\\n", s8_dpp_forced);\n'
+     '\t\t}\n'
+     '\t}\n',
+     '\tS8_R(s8_dpp_decon, 0x4c) = 1u << 13;             /* clear FRAME_DONE */\n'
+     '\t__asm__ volatile ("dsb sy" ::: "memory");\n'
+     '\tS8_R(s8_vgf_dma, 0x40) = pa;                     /* IN_BASE_ADDR_Y */\n'
+     '\tS8_R(s8_vgf_dma, 0x44) = pa;                     /* IN_BASE_ADDR_C */\n'
+     '\t__asm__ volatile ("dsb sy" ::: "memory");\n'
+     '\tfor (int i = 0; i < 800 && !(S8_R(s8_dpp_decon, 0x4c) & (1u << 13)); i++) {\n'
+     '\t\tIODelay(50);                       /* the frame after the write is out */\n'
+     '\t}\n'
+     '\tif (!(S8_R(s8_dpp_decon, 0x4c) & (1u << 13)) && (s8_dpp_forced++ % 100) == 0) {\n'
+     '\t\tIOLog("S8 DPP: no frame done within 40 ms of a flip (%u)\\n", s8_dpp_forced);\n'
+     '\t}\n', 1),
+])

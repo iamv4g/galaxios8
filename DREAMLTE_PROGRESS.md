@@ -664,6 +664,31 @@ launchd logs, because the loader's pmsg copy is overwritten by the kernel):
 - Next: the user looks at a DPP boot (c20 image settings) to confirm the
   picture; then DPP goes into the daily image.
 
+### DPP on the phone, with the user watching (c24-c28, 2026-10-23 night)
+
+All 2 GiB + `sweetfb_dpp=1`, user at the phone with videos.
+
+- c24 (two stages, base switch with SFR_UPDATE_FORCE after a frame done):
+  **picture correct** (1366x2960 centred, side bars), feels faster;
+  presenter "copy" 2-4 us instead of ~9.4 ms. Tearing/flicker when swiping
+  the home screen.
+- c25 (three stages; flip masks the HW trigger, waits IDLE_STATUS, forces):
+  tear in the status-bar band, sometimes the upper half; a black flash
+  (~3 frames) opening the App Library.
+- c26 (mask first, wait only if FRAME_START without FRAME_DONE, force): same
+  status-bar tear.
+- c27 (no force; DECON window 0 shadow request, wait until it clears,
+  ~9 ms): worse, garbage in the upper part.
+- c28 (write the base only, wait for one FRAME_DONE after the write): no
+  freeze (the IDMA takes the new base by itself at its frame boundary), but
+  still a status-bar tear, a grey full-width box mid-screen and tearing
+  while swiping.
+- Not understood yet. Next: a flip-only test pattern (stages filled with
+  solid colours and numbered bars, no iOS content) to separate the flip
+  mechanism from the snapshot; read the IDMA debug/progress registers
+  (IDMA_CHAN_CONTROL/DATA) around a flip. DPP stays off in the daily image.
+- BOOT goes back to `s8-daily-d-boot.img` after c28 (2 GiB, CPU scaling).
+
 ## Open work
 
 1. Boot the latest kernel/loader: does the frame-done copy remove the tearing,

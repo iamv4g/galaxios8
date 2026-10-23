@@ -1466,7 +1466,7 @@ index 55d0057..c2e7a72 100644
  	int32_t rc = sweet_psci_cpu_on(cpu->phys_id, entry, getCPUNumber());
  	IOLog(CPU_PORT_NAME " CPU: cpu=%u PSCI CPU_ON rc=%d\n", getCPUNumber(), rc);
 diff --git iokit/Kernel/arm/SweetFramebuffer.cpp iokit/Kernel/arm/SweetFramebuffer.cpp
-index 356ff51..d87fa34 100644
+index 356ff51..9161b9f 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -48,6 +48,7 @@ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
@@ -1528,7 +1528,7 @@ index 356ff51..d87fa34 100644
  	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
  
  	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
-@@ -302,6 +316,458 @@ get32(const uint8_t *p, uint32_t off)
+@@ -302,6 +316,475 @@ get32(const uint8_t *p, uint32_t off)
  	return v;
  }
  
@@ -1765,8 +1765,9 @@ index 356ff51..d87fa34 100644
 +static bool sweet_fb_stage_pending;
 +static uint32_t sweet_fb_stage_w, sweet_fb_stage_h;
 +static IOLock *sweet_fb_stage_lock;      /* only around the indices below */
-+static uintptr_t sweet_fb_stages[2];
++static uintptr_t sweet_fb_stages[3];
 +static int sweet_fb_ready = -1, sweet_fb_busy = -1;
++static int sweet_fb_shown = -1;          /* DPP: the stage DECON scans */
 +static uint64_t sweet_fb_panel_ticks, sweet_fb_panel_copies;
 +
 +/* Not ml_io_map_wcomb: its io_submap is 8 MiB on arm and the framebuffer
@@ -1782,7 +1783,7 @@ index 356ff51..d87fa34 100644
 + * 0xd1400000, video_stream starts at 0xe3c00000); c16 used 0xd0000000, inside
 + * the TrustZone secure_camera carve-out, and took an SError. The DMA base
 + * registers are 32-bit, so XNU's RAM (0x880000000) is out of reach. */
-+static uint64_t sweet_fb_stage_phys[2] = { 0xd2000000ULL, 0xd3000000ULL };
++static uint64_t sweet_fb_stage_phys[3] = { 0xd2000000ULL, 0xd3000000ULL, 0xd4000000ULL };
 +static uint32_t s8_dpp_path1;
 +
 +/* dpp_coef.h table 0 ("Ratio <= 65536"), phases 0..8 */
@@ -1820,15 +1821,24 @@ index 356ff51..d87fa34 100644
 + */
 +#define S8_WIN(w, off) (0x1000 + (w) * 0x30 + (off))
 +static uint32_t s8_dpp_win0[8], s8_dpp_path0;
++static uint32_t s8_dpp_forced;
++static bool s8_dpp_stage_used[3] = { true, false, false };
 +
 +static void
 +sweet_fb_dpp_flip(int b)
 +{
 +	uint32_t pa = (uint32_t)sweet_fb_stage_phys[b];
++	S8_R(s8_dpp_decon, 0x4c) = 1u << 13;             /* clear FRAME_DONE */
++	__asm__ volatile ("dsb sy" ::: "memory");
 +	S8_R(s8_vgf_dma, 0x40) = pa;                     /* IN_BASE_ADDR_Y */
 +	S8_R(s8_vgf_dma, 0x44) = pa;                     /* IN_BASE_ADDR_C */
 +	__asm__ volatile ("dsb sy" ::: "memory");
-+	S8_R(s8_vgf_dma, 0) |= 1u << 4;                  /* SFR_UPDATE_FORCE */
++	for (int i = 0; i < 800 && !(S8_R(s8_dpp_decon, 0x4c) & (1u << 13)); i++) {
++		IODelay(50);                       /* the frame after the write is out */
++	}
++	if (!(S8_R(s8_dpp_decon, 0x4c) & (1u << 13)) && (s8_dpp_forced++ % 100) == 0) {
++		IOLog("S8 DPP: no frame done within 40 ms of a flip (%u)\n", s8_dpp_forced);
++	}
 +}
 +
 +static void
@@ -1902,6 +1912,7 @@ index 356ff51..d87fa34 100644
 +	S8_R(s8_vgf_dma, 0) |= 1u << 4;                  /* SFR_UPDATE_FORCE */
 +	S8_R(s8_vgf_dpp, 0) |= 1u << 4;
 +	uint32_t err_pre = S8_R(s8_vgf_dma, 0x870);
++	S8_R(s8_dpp_decon, 0x40) |= (1u << 13) | (1u << 12) | 1u;  /* frame done/start sources */
 +
 +	/* DECON: window 0 = window 5's blending, our position, channel 1. */
 +	sweet_fb_wait_frame_done();
@@ -1950,7 +1961,9 @@ index 356ff51..d87fa34 100644
 +		}
 +		IOLockUnlock(sweet_fb_stage_lock);
 +		uint64_t t0 = mach_absolute_time();
-+		sweet_fb_wait_frame_done();
++		if (!sweet_fb_dpp) {
++			sweet_fb_wait_frame_done();
++		}
 +		uint64_t t1 = mach_absolute_time();
 +		IOLockLock(sweet_fb_stage_lock);
 +		int b = sweet_fb_ready;
@@ -1963,6 +1976,10 @@ index 356ff51..d87fa34 100644
 +		sweet_fb_stage = sweet_fb_stages[b];
 +		if (sweet_fb_dpp) {
 +			sweet_fb_dpp_flip(b);
++			IOLockLock(sweet_fb_stage_lock);
++			sweet_fb_shown = b;
++			sweet_fb_busy = -1;
++			IOLockUnlock(sweet_fb_stage_lock);
 +			sweet_fb_wait_ticks += t1 - t0;
 +			sweet_fb_panel_ticks += mach_absolute_time() - t1;
 +			sweet_fb_panel_copies++;
@@ -1987,7 +2004,7 @@ index 356ff51..d87fa34 100644
  static uint32_t sweet_fb_swaps_logged;
  static uint64_t sweet_fb_swap_count;
  
-@@ -318,7 +784,16 @@ AppleCLCD::swap(const uint8_t *rec)
+@@ -318,7 +801,16 @@ AppleCLCD::swap(const uint8_t *rec)
  	IOLockLock(fLock);
  	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
  	fDirty = true;
@@ -2004,7 +2021,7 @@ index 356ff51..d87fa34 100644
  	if ((++sweet_fb_swap_count % 1000) == 0) {
  		IOLog("SWEET FB: %llu swaps\n", sweet_fb_swap_count);
  	}
-@@ -328,6 +803,117 @@ void
+@@ -328,6 +820,138 @@ void
  AppleCLCD::present(const uint8_t *rec)
  {
  	uint32_t mask = get32(rec, 0x104);
@@ -2026,13 +2043,15 @@ index 356ff51..d87fa34 100644
 +		    (uint64_t)fRowBytes * fHeight;
 +		int dpp = 0;
 +		PE_parse_boot_argn("sweetfb_dpp", &dpp, sizeof(dpp));
-+		uintptr_t stage = 0, stage2 = 0;
++		uintptr_t stage = 0, stage2 = 0, stage3 = 0;
 +		if (dpp != 0 && sweet_fb_scaled && stage_bytes <= 0x01000000) {
 +			stage = (uintptr_t)ml_io_map_unmappable(sweet_fb_stage_phys[0], (vm_size_t)stage_bytes, VM_WIMG_WCOMB);
 +			stage2 = stage ? (uintptr_t)ml_io_map_unmappable(sweet_fb_stage_phys[1], (vm_size_t)stage_bytes, VM_WIMG_WCOMB) : 0;
-+			if (stage2 != 0) {
++			stage3 = stage2 ? (uintptr_t)ml_io_map_unmappable(sweet_fb_stage_phys[2], (vm_size_t)stage_bytes, VM_WIMG_WCOMB) : 0;
++			if (stage3 != 0) {
 +				bzero((void *)stage, (size_t)stage_bytes);
 +				bzero((void *)stage2, (size_t)stage_bytes);
++				bzero((void *)stage3, (size_t)stage_bytes);
 +				uint32_t dw = fLogicalW * fHeight / fLogicalH;
 +				sweet_fb_dpp = sweet_fb_dpp_start(fLogicalW, fLogicalH, dw, fHeight, (fWidth - dw) / 2);
 +			}
@@ -2091,6 +2110,8 @@ index 356ff51..d87fa34 100644
 +			}
 +			sweet_fb_stages[0] = stage;
 +			sweet_fb_stages[1] = stage2;
++			sweet_fb_stages[2] = sweet_fb_dpp ? stage3 : 0;
++			sweet_fb_shown = sweet_fb_dpp ? 0 : -1;  /* sweet_fb_dpp_start shows stage 0 */
 +			if (kernel_thread_start(sweet_fb_presenter, NULL, &t) == KERN_SUCCESS) {
 +				thread_deallocate(t);
 +				sweet_fb_stage = stage;
@@ -2103,13 +2124,30 @@ index 356ff51..d87fa34 100644
 +	int slot = -1;
 +	if (sweet_fb_stage != 0) {
 +		IOLockLock(sweet_fb_stage_lock);
-+		slot = sweet_fb_busy == 0 ? 1 : (sweet_fb_busy == 1 ? 0 : (sweet_fb_ready == 0 ? 1 : 0));
++		if (sweet_fb_dpp) {
++			/* any stage neither shown nor being flipped to; prefer one not ready */
++			for (int i = 0; i < 3; i++) {
++				if (i != sweet_fb_busy && i != sweet_fb_shown) {
++					slot = i;
++					if (i != sweet_fb_ready) {
++						break;
++					}
++				}
++			}
++		} else {
++			slot = sweet_fb_busy == 0 ? 1 : (sweet_fb_busy == 1 ? 0 : (sweet_fb_ready == 0 ? 1 : 0));
++		}
 +		if (sweet_fb_ready == slot) {
 +			sweet_fb_ready = -1;        /* replaced by this newer frame */
 +		}
 +		IOLockUnlock(sweet_fb_stage_lock);
 +	}
 +	uintptr_t panel = slot >= 0 ? sweet_fb_stages[slot] : fPixels;
++	if (sweet_fb_dpp && slot >= 0 && !s8_dpp_stage_used[slot] && sweet_fb_shown >= 0) {
++		memcpy((void *)panel, (const void *)sweet_fb_stages[sweet_fb_shown],
++		    (size_t)sweet_fb_stage_w * 4 * sweet_fb_stage_h);
++		s8_dpp_stage_used[slot] = true;
++	}
 +	bool logical = sweet_fb_stage != 0 && sweet_fb_scaled;
 +	int32_t offX = logical ? 0 : fOffX, offY = logical ? 0 : fOffY;
 +	int32_t tgtW = logical ? (int32_t)sweet_fb_stage_w : (int32_t)fWidth;
@@ -2122,7 +2160,7 @@ index 356ff51..d87fa34 100644
  
  
  	if (!fConsolePaused) {
-@@ -380,8 +966,13 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -380,8 +1004,13 @@ AppleCLCD::present(const uint8_t *rec)
  			dx = dy = 0;
  		}
  		/* Logical (presented) display coordinates -> panel coordinates. */
@@ -2136,7 +2174,7 @@ index 356ff51..d87fa34 100644
  		if (dx < 0) {
  			sx -= dx;
  			w += dx;
-@@ -398,12 +989,21 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -398,12 +1027,21 @@ AppleCLCD::present(const uint8_t *rec)
  		if (h > (int32_t)s->height - sy) {
  			h = (int32_t)s->height - sy;
  		}
@@ -2158,7 +2196,7 @@ index 356ff51..d87fa34 100644
  		uint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow +
  		    (uint64_t)(sx + w) * 4;
  		if (w <= 0 || h <= 0 || s->elementWidth != 1 || s->elementHeight != 1 ||
-@@ -411,14 +1011,49 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -411,14 +1049,49 @@ AppleCLCD::present(const uint8_t *rec)
  			src = 0;
  		}
  		if (src != 0 && bpe == 4) {
