@@ -572,6 +572,38 @@ launchd logs, because the loader's pmsg copy is overwritten by the kernel):
   0x164840e0, ACPM DVFS id 0x0B040004). First milestone: "the Mali does one
   job" (power on, read GPU_ID, run one write-value job).
 
+### Tests 2026-10-23 evening (c14-c17)
+
+- c15 (512 MiB, `sweetfb_dpp=1`): panicked at the first present,
+  `kmem_alloc(..., 10964992, 0x100021): failed with 3`: `ml_io_map_wcomb`
+  maps in `io_submap`, 8 MiB on arm, mostly taken by the framebuffer. Now
+  `ml_io_map_unmappable(..., VM_WIMG_WCOMB)` (kernel_map). No DPP register
+  was touched.
+- c14 (2 GiB, kmem slack): early panic again, screen photo: "S8 KMEM: map
+  0xffffffe000000000-... largest free 0x73dfc000 static claims 0xe254bc000
+  (13)", then claim `zones` size 0x600000000 start 0xfffffff89033c000 (2 of
+  17) failing. c15's log at 512 MiB: largest free 0xbd45fc000 (47.3 GiB),
+  static claims 0x829513000 (32.6 GiB), zone map at 0xfffffff248bd1000.
+  **Cause: the build uses macOS policies (XNU_TARGET_OS_OSX); there the
+  compressor reserves 16x RAM of VA** (8 GiB at 512 MiB, 32 GiB at 2 GiB:
+  the +24 GiB). 0124 now uses the iOS sizing (pool = max_mem) on
+  ARM64_BOARD_CONFIG_A5XELTE. The 1 GiB slack was the wrong idea (kept;
+  harmless).
+- c16 (512 MiB, DPP with the io_map fix): SError ("Unhandled implementation
+  specific error") at the first present, before the DPP log lines: the
+  stage buffers at 0xd0000000 lie in TWRP DT `reserved-memory/secure_camera`
+  (0xd0000000-0xd1400000, TrustZone). Low DRAM free of reserved-memory
+  nodes: 0xd1400000-0xe3c00000 (secure_camera to video_stream); stages now at
+  0xd2000000 / 0xd3000000. (Other carve-outs: camera ion 0xc0400000-
+  0xce800000 holds the framebuffer; tui, crypto, modem, cp logging, gnss,
+  abox above 0xe3c00000.) The DPU DMA base is 32-bit, so XNU RAM
+  (0x880000000) cannot be used without the SYSMMU.
+- c17 (2 GiB, compressor fix, no DPP): not back in TWRP after 10 min; phone
+  off USB. Needs the user at the phone (screen photo, key combo). The
+  watcher restores the daily BOOT and pulls logs as `c17b` once TWRP shows.
+- Kernel with all fixes (DPP stages at 0xd2000000) building for the next
+  DPP test.
+
 ## Open work
 
 1. Boot the latest kernel/loader: does the frame-done copy remove the tearing,

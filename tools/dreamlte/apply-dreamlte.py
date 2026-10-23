@@ -2033,18 +2033,28 @@ edit('osfmk/vm/vm_kern.c', [
 # table 0 for upscaling, phases 0..8 as dpp_reg_set_h/v_coef write them) and
 # decon_reg.c (decon_reg_set_window_control, decon_reg_config_win_channel).
 # The DPU SYSMMUs are off (loader), so the DMA reads physical addresses: the
-# two stage buffers live in low DRAM XNU never uses (0xd0000000 and
-# 0xd1000000, System RAM under Linux, away from the 0xcc000000 framebuffer),
+# two stage buffers live in low DRAM XNU never uses (0xd2000000 and
+# 0xd3000000, System RAM no reserved-memory node claims),
 # mapped write-combined. Each present points VGF0 at the stage just written,
 # right after a DECON frame-done, and forces the DMA SFR update (forcing at
 # a random time gave artifacts in an earlier test). If the DMA or DPP
 # reports a configuration error after the switch, window 5 goes back to G0
 # and the CPU path is used. Built, not tested on the phone.
 S8_DPP = r'''
-extern "C" vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
+/* Not ml_io_map_wcomb: its io_submap is 8 MiB on arm and the framebuffer
+ * mapping already uses most of it (c15 panicked "kmem_alloc(..., 10964992,
+ * 0x100021): failed with 3"); the unmappable variant maps in kernel_map. */
+extern "C" vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size, unsigned int flags);
+#ifndef VM_WIMG_WCOMB
+#define VM_WIMG_WCOMB 0x6                 /* osfmk/arm/memory_types.h */
+#endif
 static bool sweet_fb_dpp;
 static vm_offset_t s8_vgf_dma, s8_vgf_dpp, s8_dpp_decon;
-static uint64_t sweet_fb_stage_phys[2] = { 0xd0000000ULL, 0xd1000000ULL };
+/* Low DRAM no reserved-memory node claims (TWRP DT: secure_camera ends at
+ * 0xd1400000, video_stream starts at 0xe3c00000); c16 used 0xd0000000, inside
+ * the TrustZone secure_camera carve-out, and took an SError. The DMA base
+ * registers are 32-bit, so XNU's RAM (0x880000000) is out of reach. */
+static uint64_t sweet_fb_stage_phys[2] = { 0xd2000000ULL, 0xd3000000ULL };
 static uint32_t s8_dpp_win_start, s8_dpp_win_end, s8_dpp_win_count, s8_dpp_path1;
 
 /* dpp_coef.h table 0 ("Ratio <= 65536"), phases 0..8 */
@@ -2200,8 +2210,8 @@ edit('iokit/Kernel/arm/SweetFramebuffer.cpp', [
      '\t\tPE_parse_boot_argn("sweetfb_dpp", &dpp, sizeof(dpp));\n'
      '\t\tuintptr_t stage = 0, stage2 = 0;\n'
      '\t\tif (dpp != 0 && sweet_fb_scaled && stage_bytes <= 0x01000000) {\n'
-     '\t\t\tstage = (uintptr_t)ml_io_map_wcomb(sweet_fb_stage_phys[0], (vm_size_t)stage_bytes);\n'
-     '\t\t\tstage2 = stage ? (uintptr_t)ml_io_map_wcomb(sweet_fb_stage_phys[1], (vm_size_t)stage_bytes) : 0;\n'
+     '\t\t\tstage = (uintptr_t)ml_io_map_unmappable(sweet_fb_stage_phys[0], (vm_size_t)stage_bytes, VM_WIMG_WCOMB);\n'
+     '\t\t\tstage2 = stage ? (uintptr_t)ml_io_map_unmappable(sweet_fb_stage_phys[1], (vm_size_t)stage_bytes, VM_WIMG_WCOMB) : 0;\n'
      '\t\t\tif (stage2 != 0) {\n'
      '\t\t\t\tbzero((void *)stage, (size_t)stage_bytes);\n'
      '\t\t\t\tbzero((void *)stage2, (size_t)stage_bytes);\n'
@@ -2216,4 +2226,21 @@ edit('iokit/Kernel/arm/SweetFramebuffer.cpp', [
      '\t\t\tstage = (uintptr_t)IOMallocData((vm_size_t)stage_bytes);\n'
      '\t\t\tstage2 = stage ? (uintptr_t)IOMallocData((vm_size_t)stage_bytes) : 0;\n'
      '\t\t}\n', 1),
+])
+
+# RAM above 512 MiB, the real cause (c14's screen with the "S8 KMEM" line):
+# kernel_map has ~47 GiB free after the physmap, and the static claims grew
+# from 32.6 GiB (512 MiB, c15) to 56.6 GiB (2 GiB). The build uses macOS
+# policies (XNU_TARGET_OS_OSX), where the compressor reserves 16x RAM of VA
+# (8 GiB at 512 MiB, 32 GiB at 2 GiB). Use the iOS sizing on this board
+# (the #else branch: pool = max_mem, multiplier 1).
+edit('osfmk/vm/vm_compressor.c', [
+    ('\tcompressor_pool_max_size = C_SEG_MAX_LIMIT;\n'
+     '\tcompressor_pool_max_size *= c_seg_bufsize;\n'
+     '\n'
+     '#if XNU_TARGET_OS_OSX\n',
+     '\tcompressor_pool_max_size = C_SEG_MAX_LIMIT;\n'
+     '\tcompressor_pool_max_size *= c_seg_bufsize;\n'
+     '\n'
+     '#if XNU_TARGET_OS_OSX && !defined(ARM64_BOARD_CONFIG_A5XELTE)\n', 1),
 ])

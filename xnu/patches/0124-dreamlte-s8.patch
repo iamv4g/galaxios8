@@ -1434,7 +1434,7 @@ index 55d0057..73c1ca4 100644
  	int32_t rc = sweet_psci_cpu_on(cpu->phys_id, entry, getCPUNumber());
  	IOLog(CPU_PORT_NAME " CPU: cpu=%u PSCI CPU_ON rc=%d\n", getCPUNumber(), rc);
 diff --git iokit/Kernel/arm/SweetFramebuffer.cpp iokit/Kernel/arm/SweetFramebuffer.cpp
-index 356ff51..6dbd557 100644
+index 356ff51..0bb9fec 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -48,6 +48,7 @@ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
@@ -1496,7 +1496,7 @@ index 356ff51..6dbd557 100644
  	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
  
  	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
-@@ -302,6 +316,424 @@ get32(const uint8_t *p, uint32_t off)
+@@ -302,6 +316,434 @@ get32(const uint8_t *p, uint32_t off)
  	return v;
  }
  
@@ -1737,10 +1737,20 @@ index 356ff51..6dbd557 100644
 +static int sweet_fb_ready = -1, sweet_fb_busy = -1;
 +static uint64_t sweet_fb_panel_ticks, sweet_fb_panel_copies;
 +
-+extern "C" vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
++/* Not ml_io_map_wcomb: its io_submap is 8 MiB on arm and the framebuffer
++ * mapping already uses most of it (c15 panicked "kmem_alloc(..., 10964992,
++ * 0x100021): failed with 3"); the unmappable variant maps in kernel_map. */
++extern "C" vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size, unsigned int flags);
++#ifndef VM_WIMG_WCOMB
++#define VM_WIMG_WCOMB 0x6                 /* osfmk/arm/memory_types.h */
++#endif
 +static bool sweet_fb_dpp;
 +static vm_offset_t s8_vgf_dma, s8_vgf_dpp, s8_dpp_decon;
-+static uint64_t sweet_fb_stage_phys[2] = { 0xd0000000ULL, 0xd1000000ULL };
++/* Low DRAM no reserved-memory node claims (TWRP DT: secure_camera ends at
++ * 0xd1400000, video_stream starts at 0xe3c00000); c16 used 0xd0000000, inside
++ * the TrustZone secure_camera carve-out, and took an SError. The DMA base
++ * registers are 32-bit, so XNU's RAM (0x880000000) is out of reach. */
++static uint64_t sweet_fb_stage_phys[2] = { 0xd2000000ULL, 0xd3000000ULL };
 +static uint32_t s8_dpp_win_start, s8_dpp_win_end, s8_dpp_win_count, s8_dpp_path1;
 +
 +/* dpp_coef.h table 0 ("Ratio <= 65536"), phases 0..8 */
@@ -1921,7 +1931,7 @@ index 356ff51..6dbd557 100644
  static uint32_t sweet_fb_swaps_logged;
  static uint64_t sweet_fb_swap_count;
  
-@@ -318,7 +750,16 @@ AppleCLCD::swap(const uint8_t *rec)
+@@ -318,7 +760,16 @@ AppleCLCD::swap(const uint8_t *rec)
  	IOLockLock(fLock);
  	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
  	fDirty = true;
@@ -1938,7 +1948,7 @@ index 356ff51..6dbd557 100644
  	if ((++sweet_fb_swap_count % 1000) == 0) {
  		IOLog("SWEET FB: %llu swaps\n", sweet_fb_swap_count);
  	}
-@@ -328,6 +769,117 @@ void
+@@ -328,6 +779,117 @@ void
  AppleCLCD::present(const uint8_t *rec)
  {
  	uint32_t mask = get32(rec, 0x104);
@@ -1962,8 +1972,8 @@ index 356ff51..6dbd557 100644
 +		PE_parse_boot_argn("sweetfb_dpp", &dpp, sizeof(dpp));
 +		uintptr_t stage = 0, stage2 = 0;
 +		if (dpp != 0 && sweet_fb_scaled && stage_bytes <= 0x01000000) {
-+			stage = (uintptr_t)ml_io_map_wcomb(sweet_fb_stage_phys[0], (vm_size_t)stage_bytes);
-+			stage2 = stage ? (uintptr_t)ml_io_map_wcomb(sweet_fb_stage_phys[1], (vm_size_t)stage_bytes) : 0;
++			stage = (uintptr_t)ml_io_map_unmappable(sweet_fb_stage_phys[0], (vm_size_t)stage_bytes, VM_WIMG_WCOMB);
++			stage2 = stage ? (uintptr_t)ml_io_map_unmappable(sweet_fb_stage_phys[1], (vm_size_t)stage_bytes, VM_WIMG_WCOMB) : 0;
 +			if (stage2 != 0) {
 +				bzero((void *)stage, (size_t)stage_bytes);
 +				bzero((void *)stage2, (size_t)stage_bytes);
@@ -2056,7 +2066,7 @@ index 356ff51..6dbd557 100644
  
  
  	if (!fConsolePaused) {
-@@ -380,8 +932,13 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -380,8 +942,13 @@ AppleCLCD::present(const uint8_t *rec)
  			dx = dy = 0;
  		}
  		/* Logical (presented) display coordinates -> panel coordinates. */
@@ -2070,7 +2080,7 @@ index 356ff51..6dbd557 100644
  		if (dx < 0) {
  			sx -= dx;
  			w += dx;
-@@ -398,12 +955,21 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -398,12 +965,21 @@ AppleCLCD::present(const uint8_t *rec)
  		if (h > (int32_t)s->height - sy) {
  			h = (int32_t)s->height - sy;
  		}
@@ -2092,7 +2102,7 @@ index 356ff51..6dbd557 100644
  		uint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow +
  		    (uint64_t)(sx + w) * 4;
  		if (w <= 0 || h <= 0 || s->elementWidth != 1 || s->elementHeight != 1 ||
-@@ -411,14 +977,49 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -411,14 +987,49 @@ AppleCLCD::present(const uint8_t *rec)
  			src = 0;
  		}
  		if (src != 0 && bpe == 4) {
@@ -2487,6 +2497,19 @@ index 2ab4334..f2489bd 100644
  	sweet_log_append(c, size);
  #endif
  #if defined(ARM64_BOARD_CONFIG_A5XELTE)
+diff --git osfmk/vm/vm_compressor.c osfmk/vm/vm_compressor.c
+index 1e7ca07..3f35cfd 100644
+--- a/osfmk/vm/vm_compressor.c
++++ b/osfmk/vm/vm_compressor.c
+@@ -811,7 +811,7 @@ vm_compressor_set_size(void)
+ 	compressor_pool_max_size = C_SEG_MAX_LIMIT;
+ 	compressor_pool_max_size *= c_seg_bufsize;
+ 
+-#if XNU_TARGET_OS_OSX
++#if XNU_TARGET_OS_OSX && !defined(ARM64_BOARD_CONFIG_A5XELTE)
+ 
+ 	if (vm_compression_limit == 0) {
+ 		if (max_mem <= (4ULL * 1024ULL * 1024ULL * 1024ULL)) {
 diff --git osfmk/vm/vm_kern.c osfmk/vm/vm_kern.c
 index 54edb01..dffd32c 100644
 --- a/osfmk/vm/vm_kern.c
