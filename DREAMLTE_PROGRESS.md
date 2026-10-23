@@ -505,6 +505,19 @@ launchd logs, because the loader's pmsg copy is overwritten by the kernel):
   swipes (backboardd/SpringBoard idle in mach_msg), so the swipe script hit
   another UI state. Smoothness still needs a hand test.
 
+- **c12** (same, `s8big=2002000`): Mongoose 2002 MHz reached 81 C within a
+  minute; the guard held 80-82 C by stepping both clusters (big 1703-2002,
+  lit 1053-1690) for the whole run. Works, but too hot for a phone in the
+  hand: the daily setting stays 1703 / 1690. Same lock-screen state as c11
+  at the scripted Home press, so no frame-rate comparison again.
+- CI for ee605ef: loader 39887455877 and xnu 39887455842 succeeded.
+- BOOT is now `s8-daily-c-boot.img` (SHA-256 `ed0003a3...b48a0`, read back
+  from sda7): p9 daily args + `s8lit=1690000 s8big=1703000`, no swipes, no
+  autoreset. Not yet tried by hand.
+- Next: the user's hand test (unlock, swipe, Settings > About). The swipe
+  script needs to handle the display already being on (c11/c12) before its
+  frame rate means anything again.
+
 ## Open work
 
 1. Boot the latest kernel/loader: does the frame-done copy remove the tearing,
