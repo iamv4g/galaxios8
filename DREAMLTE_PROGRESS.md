@@ -941,8 +941,48 @@ passed again.
   triangles + glFinish: 9.4 ms per frame** (most of it the two 11 MB cache
   flushes per submit; a write-combined surface would avoid them).
 
+### State at the end of the GPU night (2026-10-24, 04:00)
+
+- **BOOT is `s8-daily-e-boot.img`** (SHA-256 1cb8b2b6...ef5d, read back from
+  sda7): daily-d's boot-args (2 GiB, cpus=8, CPU scaling, no autoreset, no
+  watchdog) + kernel c42 + `s8mali=1` (driver up, cores off when idle, no
+  self-test). Validated as c44 (same args + `s8autoreset=240`): 453 execs,
+  `S8 MALI: registered (s8mali=1)`, autoreset. Fallback: daily-d.
+- Drop zone holds an empty archive (s8drop runs nothing at boot). Test
+  programs: `shim/dreamlte/out/drop/` (git-ignored); rebuild a drop with
+  `mkdrop.py OUT.img FILES` (+ = run) and `drop.sh OUT.img`, then boot a
+  test image with `s8autoreset`.
+- Phone left in TWRP. The live root carries /usr/local/bin/s8drop (+ job),
+  s8malitest, s8gltest, /usr/local/lib/libOSMesa.8.dylib (the root copy is
+  the first Mesa build, without the G71 id mask; the drop copy is current).
+- What works on the phone: S8Mali kernel driver (jobs, page tables, fault
+  recovery, idle power), user client from iOS processes, Mesa 25.0.7
+  OpenGL (Panfrost) on the Mali from iOS user space, rendering into memory,
+  textures/FBOs and IOSurfaces. What does not exist yet: anything of iOS
+  itself (CoreAnimation/backboardd, apps) using the GPU; the UI still
+  renders on the CPU.
+
+### GPU: next steps (plan, not started)
+
+1. CoreAnimation on the Mali: HackiOS's route (research/hackios
+   userland/src/inject.c + eagl.c, MIT): DYLD_INSERT_LIBRARIES into
+   backboardd (needs the AMFI stand-in to allow it), make CA's
+   EAGLServer::renderer() pick its OpenGL ES backend, and back EAGLContext
+   with OSMesa (IOSurface render targets now work). Their vtable and
+   function addresses are for iOS 16.5 20F66; ours is 16.7.16 20H392, so
+   every address has to be found again (REA on the dyld cache) and checked.
+   Days of work, step by step with the UI as the test.
+2. Cache flushes: GPU-rendered IOSurfaces cost two full clean+invalidate
+   passes per submit (9.4 ms/frame at 1125x2436); allocate GPU-target
+   surfaces write-combined (SweetSurface cache mode) or flush only what a
+   frame wrote.
+3. Driver: per-process GPU address spaces (all clients share AS 0 now),
+   job IRQs instead of polling, tiler-heap grow on fault (HEAP BOs back
+   32 MiB), the 1.2 s slowest frame seen once per soak.
+
 ## Open work
 
+0. GPU: see "GPU: next steps" above.
 1. Boot the latest kernel/loader: does the frame-done copy remove the tearing,
    and does the new Mongoose order start core 0x000?
 2. Mongoose: remaining cores, L2/non-CPU power, then raise the A53 clock.
