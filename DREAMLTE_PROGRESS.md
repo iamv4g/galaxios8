@@ -896,6 +896,15 @@ from write-combined memory: probably most of it; not yet measured apart);
 glGetError 0. Kernel: "s8gltest closed: 19 BOs, 487 submits, 487 done; 0
 faults, 0 resets". First GPU-rendered OpenGL on this port. Not yet: any
 iOS app or CoreAnimation using it (OSMesa renders off-screen).
+- c40 (kernel with one descriptor per BO, `s8mali=2`, drop g5): self-test
+  passed again; s8gltest passed again and, rendering into a texture FBO
+  (1125x2436, clear + 64 triangles + glFinish, no copy to the caller):
+  **1087 us per frame**. So the 142 ms frames above are OSMesa's copy out.
+  **90 s soak alongside the booting iOS UI: 56798 frames, 1136 pixel checks
+  (glReadPixels), 0 wrong; 118627 submits, all done, no fault or reset**
+  (the one fault is the self-test's T4). Slowest frame 1.14 s (once; not
+  investigated: boot-time CPU load, shader compile or the 1 ms IOSleep after
+  2000 polls). DVFS: 67 C. iOS booted and autoreset as usual.
 
 ## Open work
 

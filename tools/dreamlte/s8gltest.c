@@ -9,6 +9,10 @@
  *    4  triangle check: 1 ok, number of wrong probe pixels
  *    5  frames: count, microseconds per frame (clear + 64 triangles + glFinish, 1125x2436)
  *    6  glGetError at the end, OSMesa context (1 = made)
+ *    8  FBO frames (render target texture 1125x2436, clear + 64 triangles + glFinish, no copy
+ *       to the caller): count, microseconds per frame
+ *    9  soak, 90 s of FBO frames: frames, max microseconds of one frame
+ *   10  soak: wrong probe pixels (glReadPixels of one pixel every 50 frames), checks
  *    7  memorystatus_control (raise the jetsam limit to 1 GiB): return value, errno
  *  200+ stderr (Mesa's messages), 16 bytes per report
  *  400+ on SIGABRT/SIGSEGV/SIGBUS: frame i, (image: 0 s8gltest, 1 libOSMesa, 2 other) << 56 |
@@ -33,8 +37,10 @@
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <CoreFoundation/CoreFoundation.h>
+#define GL_GLEXT_PROTOTYPES 1
 #include <GL/osmesa.h>
 #include <GL/gl.h>
+#include <GL/glext.h>
 
 typedef mach_port_t io_object_t;
 typedef io_object_t io_service_t;
@@ -218,6 +224,67 @@ main(void)
 		us = (mach_absolute_time() - t0) * tb.numer / tb.denom / 1000 / frames;
 	}
 	report(5, frames, us);
+
+	/* the same frames into a texture: the GPU's own time, without OSMesa's copy out */
+	GLuint fbo = 0, tex = 0;
+	glGenTextures(1, &tex);
+	glBindTexture(GL_TEXTURE_2D, tex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, FW, FH, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+	glGenFramebuffers(1, &fbo);
+	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+	uint64_t fbo_frames = 0, fbo_us = 0, soak = 0, soak_max = 0, soak_bad = 0, soak_checks = 0;
+	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+		mach_timebase_info_data_t tb;
+		mach_timebase_info(&tb);
+		glViewport(0, 0, FW, FH);
+		uint64_t t0 = mach_absolute_time(), end = t0 + 90ULL * 1000000000ULL * tb.denom / tb.numer;
+		for (uint64_t f = 0;; f++) {
+			uint64_t ts = mach_absolute_time();
+			if (f == 300) {
+				fbo_frames = 300;
+				fbo_us = (ts - t0) * tb.numer / tb.denom / 1000 / 300;
+			}
+			if (ts > end) {
+				soak = f;
+				break;
+			}
+			float blue = (float)(f & 15) / 15.0f;
+			glClearColor(0, 0, blue, 1);
+			glClear(GL_COLOR_BUFFER_BIT);
+			glBegin(GL_TRIANGLES);
+			for (int i = 0; i < 64; i++) {
+				float x = -1.0f + (float)(i % 8) * 0.25f, y = -1.0f + (float)(i / 8) * 0.25f;
+				glColor4f(1, 1, 0, 1);
+				glVertex2f(x, y);
+				glVertex2f(x + 0.25f, y);
+				glVertex2f(x, y + 0.25f);
+			}
+			glEnd();
+			if (f % 50 == 0) {
+				/* (8, 8) is inside the first triangle: yellow; the top-right corner of
+				 * each cell is outside: the clear colour */
+				uint32_t a = 0, b = 0;
+				glReadPixels(8, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, &a);
+				glReadPixels(FW / 8 - 4, FH / 8 - 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, &b);
+				uint32_t want_b = 0xff000000u | (uint32_t)(blue * 255.0f + 0.5f) << 16;
+				soak_bad += (a != 0xff00ffffu) + (b != want_b);
+				if (soak_checks == 0 && (a != 0xff00ffffu || b != want_b)) {
+					report(11, a, b);
+				}
+				soak_checks++;
+			} else {
+				glFinish();
+			}
+			uint64_t dt = (mach_absolute_time() - ts) * tb.numer / tb.denom / 1000;
+			soak_max = dt > soak_max ? dt : soak_max;
+		}
+	}
+	report(8, fbo_frames, fbo_us);
+	report(9, soak, soak_max);
+	report(10, soak_bad, soak_checks);
+	ok = ok && fbo_frames == 300 && soak_bad == 0;
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
 	GLenum err = glGetError();
 	report(6, err, 1);
