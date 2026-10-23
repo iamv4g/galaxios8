@@ -20,6 +20,11 @@ filesize() { wc -c < "$1" | tr -d ' '; }
 CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -fno-tree-loop-distribute-patterns -march=armv8-a -Wall -Wextra -Werror"
 # Extra defines, e.g. LOADER_CFLAGS=-DMNGS_DIAG=1 for the Mongoose experiment build.
 CFLAGS="$CFLAGS ${LOADER_CFLAGS:-}"
+# Samsung's ACPM DVFS plugin, not in git: tools/dreamlte/fetch-acpm-fw.sh.
+# Without it the loader leaves the CPU clocks as S-Boot set them.
+if [ -f firmware/exynos8895_acpm_dvfs.fw ]; then
+	CFLAGS="$CFLAGS -DACPM_DVFS_FW=\"firmware/exynos8895_acpm_dvfs.fw\""
+fi
 mkdir -p out
 $CC $CFLAGS -c start.S -o out/start.o
 $CC $CFLAGS -c loader.c -o out/loader.o

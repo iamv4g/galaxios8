@@ -1573,3 +1573,367 @@ edit('bsd/dev/a5xelte_keys.c', [
     ('\tint enabled = 1;\n\tif (a5_keys_started) {',
      '\tint enabled = A5_KEYS_DEFAULT;\n\tif (a5_keys_started) {', 1),
 ])
+
+# CPU clocks through the APM firmware (ACPM), as Samsung's cpufreq does:
+# its cal-ids are ACPM vclks and cal_dfs_set_rate sends "FREQ_REQ id kHz"
+# over the AP<->APM mailbox; the firmware sets the BUCK from its ASV table,
+# then the PLL. Protocol and sources: shim/dreamlte/pmic.c acpm_cpu_clocks,
+# which sets the A53s before XNU (CMU_CPUCL0 is in the Mongoose power domain,
+# so Mongoose is set here, once its cores run). A thermal guard follows
+# Samsung's trips (DT mngs-thermal: passive 83 C, hot 115 C).
+S8_DVFS = r'''
+/*
+ * s8big= / s8lit= (kHz, an ECT level) set the cluster targets. TMU (early
+ * TMU block 0x10080000, exynos-earlytmu.c / exynos_tmu.c): sensor s code in
+ * CURRENT_TEMP at 0x40 + ..., trim in TRIMINFO + 4 * s, two-point 25/85 C.
+ * Guard: >= 80 C one level down per second, <= 70 C one level back up per
+ * 5 s, >= 95 C or an implausible reading: both clusters to the S-Boot
+ * clocks (1066 / 1053 MHz) and the guard stops.
+ */
+#define S8_TMU_BASE		0x10080000
+#define S8_ACPM_MBOX		0x16440000
+#define S8_ACPM_SRAM		0x16500000
+#define S8_ACPM_SRAM_SIZE	0xb400U
+#define S8_ACPM_INITDATA	0x2850U
+#define S8_ACPM_CH_DVFS		0       /* CMU node clock-controller@0x15a80000 */
+#define S8_DVFS_BIG		2       /* dvfs_cpucl0, Mongoose */
+#define S8_DVFS_LIT		3       /* dvfs_cpucl1, A53 */
+#define S8_FREQ_REQ		0
+#define S8_FREQ_GET		1
+
+static volatile uint8_t *s8_mbox, *s8_sram, *s8_tmu, *s8_cmu0, *s8_cmu1;
+static uint32_t s8_ch, s8_seq;
+
+static const uint32_t s8_big_levels[] = {
+	2314000, 2158000, 2002000, 1937000, 1807000, 1703000, 1469000,
+	1261000, 1170000, 1066000, 962000, 858000, 741000,
+};
+static const uint32_t s8_lit_levels[] = {
+	1690000, 1456000, 1248000, 1053000, 949000, 832000, 715000, 598000, 455000,
+};
+#define S8_NBIG ((int)(sizeof(s8_big_levels) / sizeof(s8_big_levels[0])))
+#define S8_NLIT ((int)(sizeof(s8_lit_levels) / sizeof(s8_lit_levels[0])))
+#define S8_BIG_BOOT 9                   /* 1066 MHz */
+#define S8_LIT_BOOT 3                   /* 1053 MHz */
+
+static inline uint32_t
+s8_rd(volatile uint8_t *b, uint32_t off)
+{
+	return *(volatile uint32_t *)(b + off);
+}
+
+static inline void
+s8_wr(volatile uint8_t *b, uint32_t off, uint32_t v)
+{
+	*(volatile uint32_t *)(b + off) = v;
+}
+
+static bool
+s8_sram_ok(uint32_t off, uint32_t len)
+{
+	return off < S8_ACPM_SRAM_SIZE && len <= S8_ACPM_SRAM_SIZE - off;
+}
+
+/* struct ipc_channel (72 bytes): id 0, channel_info from 16 (rx_rear,
+ * rx_front, rx_base at 16/20/24; tx_rear, tx_front, tx_base at 40/44/48;
+ * q_len 52, q_elem_size 56). APM's RX queue is our TX queue. */
+static bool
+s8_acpm_find(void)
+{
+	uint32_t chans = s8_rd(s8_sram, S8_ACPM_INITDATA + 0x08);
+	uint32_t n = s8_rd(s8_sram, S8_ACPM_INITDATA + 0x18);
+	if (n == 0 || n > 32 || !s8_sram_ok(chans, n * 72)) {
+		return false;
+	}
+	for (uint32_t i = 0; i < n; i++) {
+		uint32_t c = chans + i * 72;
+		if (s8_rd(s8_sram, c) != S8_ACPM_CH_DVFS) {
+			continue;
+		}
+		uint32_t len = s8_rd(s8_sram, c + 52), elem = s8_rd(s8_sram, c + 56);
+		if (len < 1 || len > 64 || elem < 16 || elem > 64 || (elem & 3) ||
+		    !s8_sram_ok(s8_rd(s8_sram, c + 24), len * elem) ||
+		    !s8_sram_ok(s8_rd(s8_sram, c + 48), len * elem)) {
+			return false;
+		}
+		if (!s8_sram_ok(s8_rd(s8_sram, c + 16), 4) || !s8_sram_ok(s8_rd(s8_sram, c + 20), 4) ||
+		    !s8_sram_ok(s8_rd(s8_sram, c + 40), 4) || !s8_sram_ok(s8_rd(s8_sram, c + 44), 4)) {
+			return false;
+		}
+		s8_ch = c;
+		return true;
+	}
+	return false;
+}
+
+/* One-slot buffer channels (type 2): Samsung writes the AP slot, raises the
+ * APM interrupt and takes the answer from the APM slot in its interrupt
+ * thread. Polled here. (DVFS channel 0 is a queue; kept for completeness.) */
+static int
+s8_acpm_send_buffer(uint32_t cmd[4])
+{
+	uint32_t c = s8_ch, elem = s8_rd(s8_sram, c + 56);
+	if (++s8_seq >= 64) {
+		s8_seq = 1;
+	}
+	uint32_t seq = s8_seq;
+	cmd[0] |= seq << 16;
+	s8_wr(s8_mbox, 0x20, 1u << S8_ACPM_CH_DVFS);               /* INTCR1 */
+	uint32_t slot = s8_rd(s8_sram, c + 24);
+	for (uint32_t i = 0; i < elem / 4; i++) {
+		s8_wr(s8_sram, slot + 4 * i, i < 4 ? cmd[i] : 0);
+	}
+	__builtin_arm_dsb(DSB_SY);
+	s8_wr(s8_mbox, 0x08, (1u << S8_ACPM_CH_DVFS) << 16);      /* INTGR0 */
+	uint32_t r = s8_rd(s8_sram, c + 48);
+	uint64_t t0 = mach_absolute_time();
+	while (mach_absolute_time() - t0 < 26000000 / 20) {       /* 50 ms */
+		if (!(s8_rd(s8_mbox, 0x28) & (1u << S8_ACPM_CH_DVFS))) {  /* INTSR1 */
+			continue;
+		}
+		if (((s8_rd(s8_sram, r) >> 16) & 0x3f) != seq) {
+			s8_wr(s8_mbox, 0x20, 1u << S8_ACPM_CH_DVFS);
+			continue;
+		}
+		for (int k = 0; k < 4; k++) {
+			cmd[k] = s8_rd(s8_sram, r + 4 * k);
+		}
+		s8_wr(s8_mbox, 0x20, 1u << S8_ACPM_CH_DVFS);
+		return 0;
+	}
+	return -2;
+}
+
+/* acpm_ipc_send_data + check_response, polled; cmd[1] carries the answer. */
+static int
+s8_acpm_send(uint32_t cmd[4])
+{
+	uint32_t c = s8_ch;
+	if (s8_rd(s8_sram, c + 12) == 2) {
+		return s8_acpm_send_buffer(cmd);
+	}
+	uint32_t len = s8_rd(s8_sram, c + 52), elem = s8_rd(s8_sram, c + 56);
+	uint32_t front = s8_rd(s8_sram, s8_rd(s8_sram, c + 20)), next = (front + 1) % len;
+	if (front >= len || next == s8_rd(s8_sram, s8_rd(s8_sram, c + 16))) {
+		return -1;
+	}
+	if (++s8_seq >= 64) {
+		s8_seq = 1;
+	}
+	uint32_t seq = s8_seq;
+	cmd[0] |= seq << 16;
+	uint32_t slot = s8_rd(s8_sram, c + 24) + front * elem;
+	for (uint32_t i = 0; i < elem / 4; i++) {
+		s8_wr(s8_sram, slot + 4 * i, i < 4 ? cmd[i] : 0);
+	}
+	__builtin_arm_dsb(DSB_SY);
+	s8_wr(s8_sram, s8_rd(s8_sram, c + 20), next);
+	__builtin_arm_dsb(DSB_SY);
+	s8_wr(s8_mbox, 0x08, (1u << S8_ACPM_CH_DVFS) << 16);      /* INTGR0 */
+
+	uint64_t t0 = mach_absolute_time();
+	while (mach_absolute_time() - t0 < 26000000 / 20) {       /* 50 ms */
+		if (!(s8_rd(s8_mbox, 0x28) & (1u << S8_ACPM_CH_DVFS))) {  /* INTSR1 */
+			continue;
+		}
+		uint32_t base = s8_rd(s8_sram, c + 48);
+		uint32_t rear = s8_rd(s8_sram, s8_rd(s8_sram, c + 40));
+		uint32_t f = s8_rd(s8_sram, s8_rd(s8_sram, c + 44));
+		if (rear >= len || f >= len) {
+			return -3;
+		}
+		for (uint32_t i = rear; i != f; i = (i + 1) % len) {
+			uint32_t r = base + i * elem;
+			if (((s8_rd(s8_sram, r) >> 16) & 0x3f) != seq) {
+				continue;
+			}
+			for (int k = 0; k < 4; k++) {
+				cmd[k] = s8_rd(s8_sram, r + 4 * k);
+			}
+			if (i != rear) {
+				for (uint32_t k = 0; k < elem / 4; k++) {
+					s8_wr(s8_sram, r + 4 * k, s8_rd(s8_sram, base + rear * elem + 4 * k));
+				}
+			}
+			rear = (rear + 1) % len;
+			s8_wr(s8_sram, s8_rd(s8_sram, c + 40), rear);
+			if (rear == s8_rd(s8_sram, s8_rd(s8_sram, c + 44))) {
+				s8_wr(s8_mbox, 0x20, 1u << S8_ACPM_CH_DVFS);       /* INTCR1 */
+			}
+			return 0;
+		}
+	}
+	return -2;
+}
+
+static int
+s8_acpm_freq(uint32_t id, uint32_t op, uint32_t khz, uint32_t *ans)
+{
+	uint32_t cmd[4] = { id, khz, op, 0 };
+	int rc = s8_acpm_send(cmd);
+	*ans = cmd[1];
+	return rc;
+}
+
+static uint32_t
+s8_pll_mhz(volatile uint8_t *cmu)
+{
+	uint32_t v = s8_rd(cmu, 0x120);
+	uint32_t m = (v >> 16) & 0x3ff, p = (v >> 8) & 0x3f, s = v & 7;
+	return p ? (uint32_t)((26ULL * m / p) >> s) : 0;
+}
+
+/* Hottest sensor in C (MNGS 0, 2-5; APOLLO 1), or 0 if any reads implausibly. */
+static int
+s8_tmu_temp(void)
+{
+	uint32_t two_point = (s8_rd(s8_tmu, 0) >> 23) & 1;
+	int hot = 0;
+	for (uint32_t s = 0; s < 6; s++) {
+		uint32_t trim = s8_rd(s8_tmu, 4 * s);
+		int e1 = (int)(trim & 0x1ff), e2 = (int)((trim >> 9) & 0x1ff);
+		uint32_t off = s < 2 ? 0 : ((s - 2) / 3 + 1) * 4;
+		uint32_t bit = 9 * (s < 2 ? s : (s - 2) % 3);
+		int code = (int)((s8_rd(s8_tmu, 0x40 + off) >> bit) & 0x1ff);
+		if (e1 == 0 || (two_point && e2 <= e1)) {
+			return 0;
+		}
+		int t = two_point ? (code - e1) * (85 - 25) / (e2 - e1) + 25 : code - e1 + 25;
+		if (t < 5 || t > 125) {
+			return 0;
+		}
+		hot = t > hot ? t : hot;
+	}
+	return hot;
+}
+
+static int
+s8_level(const uint32_t *levels, int n, uint32_t khz)
+{
+	for (int i = 0; i < n; i++) {
+		if (levels[i] == khz) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+static void
+s8_dvfs_set(int big, int lit, int *cur_big, int *cur_lit)
+{
+	uint32_t ans;
+	if (big != *cur_big) {
+		int rc = s8_acpm_freq(S8_DVFS_BIG, S8_FREQ_REQ, s8_big_levels[big], &ans);
+		if (rc == 0) {
+			*cur_big = big;
+		} else {
+			IOLog("S8 DVFS: big %u kHz failed %d\n", s8_big_levels[big], rc);
+		}
+	}
+	if (lit != *cur_lit) {
+		int rc = s8_acpm_freq(S8_DVFS_LIT, S8_FREQ_REQ, s8_lit_levels[lit], &ans);
+		if (rc == 0) {
+			*cur_lit = lit;
+		} else {
+			IOLog("S8 DVFS: lit %u kHz failed %d\n", s8_lit_levels[lit], rc);
+		}
+	}
+}
+
+static void
+s8_dvfs_thread(void *arg __unused, wait_result_t wr __unused)
+{
+	uint32_t big_khz = 0, lit_khz = 0, fbig = 0, flit = 0;
+	PE_parse_boot_argn("s8big", &big_khz, sizeof(big_khz));
+	PE_parse_boot_argn("s8lit", &lit_khz, sizeof(lit_khz));
+	s8_mbox = (volatile uint8_t *)ml_io_map(S8_ACPM_MBOX, 0x1000);
+	s8_sram = (volatile uint8_t *)ml_io_map(S8_ACPM_SRAM, S8_ACPM_SRAM_SIZE);
+	s8_tmu = (volatile uint8_t *)ml_io_map(S8_TMU_BASE, 0x1000);
+	s8_cmu0 = (volatile uint8_t *)ml_io_map(0x16800000, 0x1000);
+	s8_cmu1 = (volatile uint8_t *)ml_io_map(0x16900000, 0x1000);
+	if (!s8_acpm_find()) {
+		IOLog("S8 DVFS: no ACPM DVFS channel, clocks unchanged\n");
+		thread_terminate(current_thread());
+		return;
+	}
+	/* FREQ_GET answers 0 (run c10), so the PLLs tell the current level. */
+	fbig = s8_pll_mhz(s8_cmu0) * 1000;
+	flit = s8_pll_mhz(s8_cmu1) * 1000;
+	int temp = s8_tmu_temp();
+	IOLog("S8 DVFS: PLL %u / %u kHz; TMU %d C (trim0 0x%x temp 0x%x 0x%x); target %u / %u\n",
+	    fbig, flit, temp, s8_rd(s8_tmu, 0), s8_rd(s8_tmu, 0x40), s8_rd(s8_tmu, 0x44),
+	    big_khz, lit_khz);
+	int cur_big = s8_level(s8_big_levels, S8_NBIG, fbig);
+	int cur_lit = s8_level(s8_lit_levels, S8_NLIT, flit);
+	int want_big = s8_level(s8_big_levels, S8_NBIG, big_khz);
+	int want_lit = s8_level(s8_lit_levels, S8_NLIT, lit_khz);
+	if (cur_big < 0 || cur_lit < 0) {
+		IOLog("S8 DVFS: PLLs not at an ECT level, clocks unchanged\n");
+		thread_terminate(current_thread());
+		return;
+	}
+	if (want_big < 0) {
+		want_big = cur_big;
+	}
+	if (want_lit < 0) {
+		want_lit = cur_lit;
+	}
+	if (temp == 0) {
+		IOLog("S8 DVFS: TMU unreadable, back to the S-Boot clocks\n");
+		s8_dvfs_set(S8_BIG_BOOT, S8_LIT_BOOT, &cur_big, &cur_lit);
+		thread_terminate(current_thread());
+		return;
+	}
+	int big = want_big, lit = want_lit;
+	s8_dvfs_set(big, lit, &cur_big, &cur_lit);
+	IOLog("S8 DVFS: big %u lit %u kHz; PLL %u / %u MHz\n",
+	    s8_big_levels[cur_big], s8_lit_levels[cur_lit], s8_pll_mhz(s8_cmu0), s8_pll_mhz(s8_cmu1));
+	for (uint32_t tick = 1, cool = 0, hot_max = temp;; tick++) {
+		IOSleep(1000);
+		temp = s8_tmu_temp();
+		if (temp == 0 || temp >= 95) {
+			IOLog("S8 DVFS: TMU %d C, back to the S-Boot clocks, guard stops\n", temp);
+			s8_dvfs_set(S8_BIG_BOOT < cur_big ? cur_big : S8_BIG_BOOT,
+			    S8_LIT_BOOT < cur_lit ? cur_lit : S8_LIT_BOOT, &cur_big, &cur_lit);
+			break;
+		}
+		hot_max = (uint32_t)temp > hot_max ? (uint32_t)temp : hot_max;
+		if (temp >= 80) {
+			big = big + 1 < S8_NBIG ? big + 1 : big;
+			lit = lit + 1 < S8_NLIT ? lit + 1 : lit;
+			cool = 0;
+		} else if (temp <= 70 && ++cool >= 5) {
+			big = big > want_big ? big - 1 : big;
+			lit = lit > want_lit ? lit - 1 : lit;
+			cool = 0;
+		}
+		int ob = cur_big, ol = cur_lit;
+		s8_dvfs_set(big, lit, &cur_big, &cur_lit);
+		if (ob != cur_big || ol != cur_lit || tick % 30 == 0) {
+			IOLog("S8 DVFS: %d C (max %u), big %u lit %u kHz\n", temp, hot_max,
+			    s8_big_levels[cur_big], s8_lit_levels[cur_lit]);
+		}
+	}
+	thread_terminate(current_thread());
+}
+'''
+edit('iokit/Kernel/arm/SweetCPU.cpp', [
+    ('static uint32_t sweet_cpu_mhz[SWEET_SMP_MAX_CPUS];\n',
+     'static uint32_t sweet_cpu_mhz[SWEET_SMP_MAX_CPUS];\n' + S8_DVFS, 1),
+    ('\tIOLog(CPU_PORT_NAME " CPU: %u/%u CPUs initialized, SGI1 verified\\n",\n'
+     '\t    topology->num_cpus, topology->num_cpus);\n',
+     '\tIOLog(CPU_PORT_NAME " CPU: %u/%u CPUs initialized, SGI1 verified\\n",\n'
+     '\t    topology->num_cpus, topology->num_cpus);\n'
+     '#if defined(DREAMLTE)\n'
+     '\t{\n'
+     '\t\tuint32_t khz = 0;\n'
+     '\t\tthread_t t;\n'
+     '\t\tif ((PE_parse_boot_argn("s8big", &khz, sizeof(khz)) && khz) ||\n'
+     '\t\t    (PE_parse_boot_argn("s8lit", &khz, sizeof(khz)) && khz)) {\n'
+     '\t\t\tif (kernel_thread_start(s8_dvfs_thread, NULL, &t) == KERN_SUCCESS) {\n'
+     '\t\t\t\tthread_deallocate(t);\n'
+     '\t\t\t}\n'
+     '\t\t}\n'
+     '\t}\n'
+     '#endif\n', 1),
+])

@@ -148,3 +148,286 @@ uint64_t pmic_init(void (*kv_fn)(const char *, uint64_t), void (*out_fn)(const c
 	out("\n");
 	return raw;
 }
+
+/*
+ * CPU clocks through the APM firmware (ACPM). On the S8, Samsung's cpufreq
+ * driver never touches the PLLs or the BUCKs itself: its cal-ids are ACPM
+ * vclks (DT cpufreq/domain@0 0x0b040003 = dvfs_cpucl1, the A53s; domain@1
+ * 0x0b040002 = dvfs_cpucl0, Mongoose), and cal_dfs_set_rate sends
+ * "FREQ_REQ id kHz" to the APM over the mailbox (acpm_dvfs.c); the firmware
+ * sets the BUCK from its ASV table, then the PLL. Layout: Samsung's
+ * acpm_ipc.c, acpm.c, fw_header/framework.h and common.h; addresses from
+ * TWRP's live DT (acpm_ipc reg + initdata-base; acpm-ipc-channel of acpm
+ * and of the CMU node clock-controller@0x15a80000, which Samsung passes to
+ * cal_if_init and so to acpm_dvfs; channel 5 of the acpm_dvfs node only
+ * carries the APM's MIF notifications, runs c4-c9 got no answer there).
+ *
+ * S-Boot leaves the APM running its boot framework without the DVFS plugin.
+ * Samsung's Linux loads it at boot (TWRP dmesg:
+ * "plugin(id = 2) detach done", "Loading exynos8895_acpm_dvfs.fw",
+ * "plugin(id = 3) attach done"): plugins_init detaches the plugin that is
+ * attached but not stay_attached, copies the built-in blob to the base of
+ * the one that is stay_attached but not attached, and attaches it, over
+ * channel 4. The loader does the same with the identical blob
+ * (tools/dreamlte/fetch-acpm-fw.sh takes it from the RECOVERY backup; it is
+ * not in git), then sets the A53s. Mongoose is left to XNU: CMU_CPUCL0 is
+ * in the Mongoose power domain, which is off until XNU starts its cores.
+ */
+#define ACPM_MBOX		0x16440000UL	/* AP<->APM mailbox */
+#define ACPM_SRAM		0x16500000UL
+#define ACPM_SRAM_SIZE		0xb400U
+#define ACPM_INITDATA		0x2850U
+#define ACPM_CH_PLUGIN		4	/* acpm */
+#define ACPM_CH_DVFS		0	/* clock-controller@0x15a80000 (cal_if_init) */
+#define MB_INTGR0		0x08
+#define MB_INTCR1		0x20
+#define MB_INTSR1		0x28
+/* struct acpm_framework (u32 fields) */
+#define FW_PLUGINS		0x00
+#define FW_NUM_PLUGINS		0x04
+#define FW_IPC_CHANNELS		0x08
+#define FW_IPC_AP_MAX		0x18
+/* struct plugin, 32-bit firmware layout (44 bytes) */
+#define PLUGIN_SIZE		44
+#define PL_ID			0
+#define PL_BASE			4	/* SRAM offset, bit 0 = Thumb */
+#define PL_IS_ATTACHED		28	/* u8 */
+#define PL_LEN			32
+#define PL_STAY_ATTACHED	36	/* u8 */
+/* struct ipc_channel: id, field, owner, type, channel_info, ap_poll */
+#define IPC_CH_SIZE		72
+#define CH_ID			0
+#define CH_TYPE			12	/* 1 queue, 2 buffer (one slot) */
+#define CH_RX_REAR		16	/* APM's RX = our TX queue */
+#define CH_RX_FRONT		20
+#define CH_RX_BASE		24
+#define CH_TX_REAR		40	/* APM's TX = our RX queue */
+#define CH_TX_FRONT		44
+#define CH_TX_BASE		48
+#define CH_Q_LEN		52
+#define CH_Q_ELEM		56
+#define TYPE_BUFFER		2
+#define DP_D			(1u << 24)	/* ACPM_IPC_PROTOCOL_DP_D: detach */
+#define DP_A			(1u << 25)	/* attach */
+#define PROTOCOL_ID		26
+#define SEQ_SHIFT		16
+#define DVFS_CPUCL1		3	/* A53 */
+#define FREQ_REQ		0
+#define FREQ_GET		1
+
+#ifdef ACPM_DVFS_FW
+__asm__(".section .rodata\n.balign 4\n"
+	"acpm_dvfs_fw: .incbin \"" ACPM_DVFS_FW "\"\n"
+	"acpm_dvfs_fw_end:\n.previous\n");
+extern const uint8_t acpm_dvfs_fw[], acpm_dvfs_fw_end[];
+#endif
+
+static void (*acpm_rec)(uint32_t);
+static unsigned acpm_seq;
+
+static int sram_off_ok(uint32_t off, uint32_t len)
+{
+	return off < ACPM_SRAM_SIZE && len <= ACPM_SRAM_SIZE - off;
+}
+
+/* Channel descriptor of AP channel id, checked to stay inside the SRAM. */
+static uintptr_t acpm_channel(uint32_t id)
+{
+	uintptr_t fw = ACPM_SRAM + ACPM_INITDATA;
+	uint32_t chans = rd(fw + FW_IPC_CHANNELS), n = rd(fw + FW_IPC_AP_MAX);
+	if (n == 0 || n > 32 || !sram_off_ok(chans, n * IPC_CH_SIZE))
+		return 0;
+	for (uint32_t i = 0; i < n; i++) {
+		uintptr_t c = ACPM_SRAM + chans + i * IPC_CH_SIZE;
+		if (rd(c + CH_ID) != id)
+			continue;
+		uint32_t len = rd(c + CH_Q_LEN), elem = rd(c + CH_Q_ELEM);
+		if (len < 1 || len > 64 || elem < 16 || elem > 64 || (elem & 3) ||
+		    !sram_off_ok(rd(c + CH_RX_BASE), len * elem) ||
+		    !sram_off_ok(rd(c + CH_TX_BASE), len * elem) ||
+		    !sram_off_ok(rd(c + CH_RX_FRONT), 4) || !sram_off_ok(rd(c + CH_RX_REAR), 4) ||
+		    !sram_off_ok(rd(c + CH_TX_FRONT), 4) || !sram_off_ok(rd(c + CH_TX_REAR), 4))
+			return 0;
+		return c;
+	}
+	return 0;
+}
+
+/*
+ * One command and its answer, polled (acpm_ipc_send_data + check_response;
+ * for a one-slot buffer channel Samsung takes the answer from the APM slot
+ * in its interrupt thread instead). cmd[1] carries the answer. Returns 0,
+ * -1 on a full queue, -2 on timeout.
+ */
+static int acpm_send(uintptr_t c, uint32_t cmd[4])
+{
+	uintptr_t s = ACPM_SRAM;
+	uint32_t id = rd(c + CH_ID), bit = 1u << id;
+	uint32_t len = rd(c + CH_Q_LEN), elem = rd(c + CH_Q_ELEM);
+	int buffer = rd(c + CH_TYPE) == TYPE_BUFFER;
+	uint32_t front = buffer ? 0 : rd(s + rd(c + CH_RX_FRONT)), next = (front + 1) % len;
+	if (!buffer && (front >= len || next == rd(s + rd(c + CH_RX_REAR))))
+		return -1;
+	if (++acpm_seq >= 64)
+		acpm_seq = 1;
+	uint32_t seq = acpm_seq;
+	cmd[0] |= seq << SEQ_SHIFT;
+	if (buffer)
+		wr(ACPM_MBOX + MB_INTCR1, bit);
+	uintptr_t slot = s + rd(c + CH_RX_BASE) + front * elem;
+	for (uint32_t i = 0; i < elem / 4; i++)
+		wr(slot + 4 * i, i < 4 ? cmd[i] : 0);
+	__asm__ volatile("dsb sy");
+	if (!buffer) {
+		wr(s + rd(c + CH_RX_FRONT), next);
+		__asm__ volatile("dsb sy");
+	}
+	wr(ACPM_MBOX + MB_INTGR0, bit << 16);
+
+	uintptr_t base = s + rd(c + CH_TX_BASE);
+	uint64_t end = ticks() + TIMER_HZ / 20;		/* 50 ms */
+	while (ticks() < end) {
+		if (!(rd(ACPM_MBOX + MB_INTSR1) & bit))
+			continue;
+		if (buffer) {
+			if (((rd(base) >> SEQ_SHIFT) & 0x3f) != seq) {
+				wr(ACPM_MBOX + MB_INTCR1, bit);
+				continue;
+			}
+			for (int k = 0; k < 4; k++)
+				cmd[k] = rd(base + 4 * k);
+			wr(ACPM_MBOX + MB_INTCR1, bit);
+			return 0;
+		}
+		uint32_t rear = rd(s + rd(c + CH_TX_REAR)), f = rd(s + rd(c + CH_TX_FRONT));
+		if (rear >= len || f >= len)
+			return -3;
+		for (uint32_t i = rear; i != f; i = (i + 1) % len) {
+			uintptr_t r = base + i * elem;
+			if (((rd(r) >> SEQ_SHIFT) & 0x3f) != seq)
+				continue;
+			for (int k = 0; k < 4; k++)
+				cmd[k] = rd(r + 4 * k);
+			/* dequeue i: move the entry at rear into its place */
+			if (i != rear)
+				for (uint32_t k = 0; k < elem / 4; k++)
+					wr(r + 4 * k, rd(base + rear * elem + 4 * k));
+			rear = (rear + 1) % len;
+			wr(s + rd(c + CH_TX_REAR), rear);
+			if (rear == rd(s + rd(c + CH_TX_FRONT)))
+				wr(ACPM_MBOX + MB_INTCR1, bit);
+			return 0;
+		}
+	}
+	return -2;
+}
+
+/* plugins_init: detach the plugin that is attached but not to stay, load
+ * the DVFS blob into the one that is to stay but is not attached, attach. */
+static int acpm_load_dvfs(void)
+{
+#ifdef ACPM_DVFS_FW
+	uintptr_t fw = ACPM_SRAM + ACPM_INITDATA, c = acpm_channel(ACPM_CH_PLUGIN);
+	uint32_t pl = rd(fw + FW_PLUGINS), n = rd(fw + FW_NUM_PLUGINS);
+	uint32_t blob = (uint32_t)(acpm_dvfs_fw_end - acpm_dvfs_fw);
+	if (!c || n == 0 || n > 16 || !sram_off_ok(pl, n * PLUGIN_SIZE))
+		return -10;
+	int loaded = 0;
+	for (uint32_t i = 0; i < n; i++) {
+		uintptr_t p = ACPM_SRAM + pl + i * PLUGIN_SIZE;
+		uint32_t att = rd(p + PL_IS_ATTACHED) & 0xff, stay = rd(p + PL_STAY_ATTACHED) & 0xff;
+		uint32_t id = rd(p + PL_ID), cmd[4] = { 0, 0, 0, 0 };
+		if (att == 1 && stay == 0) {
+			cmd[0] = DP_D | id << PROTOCOL_ID;
+		} else if (att == 0 && stay == 1) {
+			uint32_t off = rd(p + PL_BASE) & ~1u;
+			if (loaded || !off || !sram_off_ok(off, blob) || blob > rd(p + PL_LEN))
+				return -11;
+			for (uint32_t k = 0; k < blob; k += 4)
+				wr(ACPM_SRAM + off + k, *(const uint32_t *)(acpm_dvfs_fw + k));
+			__asm__ volatile("dsb sy");
+			loaded = 1;
+			cmd[0] = DP_A | id << PROTOCOL_ID;
+		} else {
+			continue;
+		}
+		int rc = acpm_send(c, cmd);
+		acpm_rec((uint32_t)rc);
+		acpm_rec(rd(p + PL_IS_ATTACHED) & 0xff);
+		kv("plugin", id);
+		kv(cmd[0] & DP_A ? "attach rc" : "detach rc", (uint32_t)rc);
+	}
+	delay_us(5000);
+	return loaded ? 0 : -12;
+#else
+	return -13;
+#endif
+}
+
+static int acpm_freq(uintptr_t c, unsigned id, unsigned op, uint32_t khz, uint32_t *ans)
+{
+	uint32_t cmd[4] = { id, khz, op, 0 };
+	int rc = acpm_send(c, cmd);
+	*ans = cmd[1];
+	return rc;
+}
+
+/* A53 PLL_CPUCL1: F = 26 MHz * M / (P * 2^S) */
+static uint32_t cl1_pll_mhz(void)
+{
+	uint32_t v = rd(0x16900120UL);
+	uint32_t m = (v >> 16) & 0x3ff, p = (v >> 8) & 0x3f, s = v & 7;
+	return p ? (uint32_t)(26ULL * m / p >> s) : 0;
+}
+
+/* Levels of ECT dvfs_cpucl1 that Samsung's Linux uses (TWRP: 455-1690). */
+static const uint32_t lit_levels[] = {
+	1690000, 1456000, 1248000, 1053000, 949000, 832000, 715000, 598000, 455000,
+};
+
+void acpm_cpu_clocks(uint32_t lit_khz, void (*rec)(uint32_t))
+{
+	acpm_rec = rec;
+	out("ACPM (APM firmware DVFS)\n");
+	if (!lit_khz)
+		return;
+	int ok = 0;
+	for (unsigned i = 0; i < sizeof(lit_levels) / sizeof(lit_levels[0]); i++)
+		ok |= lit_levels[i] == lit_khz;
+	uintptr_t c = acpm_channel(ACPM_CH_DVFS);
+	int rc = ok && c ? acpm_load_dvfs() : -14;
+	kv("load rc", (uint32_t)rc);
+	out("\n");
+	acpm_rec(0xacc);			/* marker: results follow */
+	acpm_rec((uint32_t)rc);
+	acpm_rec(rd(c + 8));			/* channel owner, type, poll */
+	acpm_rec(rd(c + CH_TYPE));
+	acpm_rec(rd(c + 68));
+	if (rc)
+		return;
+	uint32_t f = 0;
+	rc = acpm_freq(c, DVFS_CPUCL1, FREQ_GET, 0, &f);
+	acpm_rec((uint32_t)rc);
+	acpm_rec(f);
+	rc = acpm_freq(c, DVFS_CPUCL1, FREQ_REQ, lit_khz, &f);
+	acpm_rec((uint32_t)rc);
+	delay_us(1000);
+	rc = acpm_freq(c, DVFS_CPUCL1, FREQ_GET, 0, &f);
+	acpm_rec((uint32_t)rc);
+	acpm_rec(f);
+	acpm_rec(cl1_pll_mhz());
+	acpm_rec((uint32_t)speedy(SLAVE_PMIC, 0x1e, 0, 0));
+	/* the firmware's newest log entries (8 text bytes, value) */
+	uintptr_t fw = ACPM_SRAM + ACPM_INITDATA;
+	uint32_t lf = rd(ACPM_SRAM + rd(fw + 0x38)), esz = rd(fw + 0x40), elen = rd(fw + 0x44);
+	acpm_rec(rd(ACPM_MBOX + MB_INTSR1));
+	acpm_rec(lf);
+	if (esz == 16 && elen && lf < elen && sram_off_ok(rd(fw + 0x3c), elen * esz))
+		for (uint32_t n = 0, e = (lf + elen - 7) % elen; n < 3; n++, e = (e + 1) % elen)
+			for (uint32_t k = 4; k < 16; k += 4)
+				acpm_rec(rd(ACPM_SRAM + rd(fw + 0x3c) + e * esz + k));
+	kv("lit kHz", f);
+	kv("pll MHz", cl1_pll_mhz());
+	cpu_freq();
+	out("\n");
+}

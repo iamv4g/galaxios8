@@ -441,6 +441,70 @@ eight cores. A long run has not been done yet.
   scaling in the DPP instead of the CPU scale (needs eyes on the screen);
   Reduce Transparency/Motion if the user wants it.
 
+### CPU clocks (2026-10-23)
+
+Read in TWRP (debugfs, Samsung's 4.4 source `exynos8895/android_kernel_samsung_universal8895`):
+
+- ECT ASV: this chip is group 7 for both clusters (`asv_summary` "big:7,
+  LITTLE:7"). Table versions 5-8 give the voltages seen on the PMIC: Mongoose
+  1469 MHz 743.75 mV and 1066 MHz 675 mV; A53 455 MHz 618.75 mV and 1053 MHz
+  775 mV (BUCK2/BUCK3 V = 300 mV + 6.25 mV x code, checked against
+  `regulator_summary`). Versions 5/6 and 7/8 differ only at Mongoose
+  >= 2314 and A53 1690 / <= 832 MHz.
+- PLLs (ECT `pll_list`): F = 26 MHz x M / (P x 2^S), P = 3; CMU_CPUCL0/1 + 0x120.
+- **Samsung's Linux does not set CPU clocks itself.** `cpufreq/domain@0`
+  cal-id 0x0b040003 (dvfs_cpucl1, A53, cpus 0-3) and `domain@1` 0x0b040002
+  (dvfs_cpucl0, Mongoose, cpus 4-7) are ACPM vclks: `cal_dfs_set_rate` sends
+  "FREQ_REQ id kHz" to the APM firmware (a Cortex-M core) over the mailbox,
+  and the firmware sets the BUCK from its own ASV table, then the PLL. No
+  init message is needed (Linux only copies the fvmap from SRAM).
+  Mailbox 0x16440000 (INTGR0 0x08, INTCR1 0x20, INTSR1 0x28), SRAM 0x16500000
+  (0xb400), initdata at +0x2850, DVFS channel 5 (TWRP DT `acpm_ipc`,
+  `acpm_dvfs`). Queue layout: `acpm_ipc.c`, `fw_header/framework.h`.
+- TMU: block 0x10080000 (early TMU, started by the bootloader). Sensor s:
+  code at 0x40 (+4 per three sensors from sensor 2, 9 bits each), trim at
+  4 x s, two-point 25/85 C. Mongoose sensors 0, 2-5 (balance), A53 sensor 1.
+  Samsung throttles from 83 C (passive), hot 115 C. TWRP idle: 37 C.
+
+Runs c1-c11 (each: BOOT flashed from TWRP by `cycle.sh`, `s8autoreset`
+back to TWRP; the loader appends its findings as boot-arg `s8acpm=`, which
+launchd logs, because the loader's pmsg copy is overwritten by the kernel):
+
+- c1-c3: no answer on channel 5. Firmware initdata is sane (6 plugins, 7 AP
+  channels with ids 0-6); channel 5 is a one-slot buffer channel (type 2).
+- c4-c6: the APM is powered (PMU 0x16488104 = 0x10000001) and logs our
+  interrupt ("irq_num 1") but answers nothing. Its log showed "draminit"
+  from boot only.
+- **Cause 1: the DVFS plugin is not loaded under our boot.** Samsung's Linux
+  loads it (TWRP dmesg: "plugin(id = 2) detach done", "Loading
+  exynos8895_acpm_dvfs.fw", "plugin(id = 3) attach done"; `acpm.c`
+  plugins_init, channel 4). The blob is built into TWRP's kernel and
+  identical to `firmware/exynos8895_acpm_dvfs.fw.ihex` of Samsung's tree
+  (23 552 bytes, SHA-256 a2728305...7e2). `tools/dreamlte/fetch-acpm-fw.sh`
+  takes it from `backup/RECOVERY.img` into the git-ignored
+  `shim/dreamlte/firmware/`; `build.sh` embeds it only when present (CI
+  builds without it, so the old/new `build.sh` comparison is unchanged).
+- c7-c9: the loader detaches plugin 2 and loads + attaches plugin 3 at SRAM
+  0x3800 (its size field 0x5c00 = the blob), both answered (firmware log
+  "attachid", "dyn_done"; plugin 3 is_attached = 1). Channel 5 still silent.
+- **Cause 2: wrong channel.** Channel 5 (DT `acpm_dvfs`) only carries the
+  APM's MIF notifications. Requests use the channel of the node passed to
+  `cal_if_init`, the CMU `clock-controller@0x15a80000`: channel **0** (a
+  polled queue). Other channels: 1 devfreq/exynos-dm, 2 the S2MPS17 PMIC,
+  4 plugin attach/detach.
+- **c10: A53 at 1689-1690 MHz** (was 1053) on all four cores (initCPU
+  PMCCNTR); PLL 1690 MHz, BUCK3 0x7a = 1062.5 mV: the ASV group-7 value of
+  table versions 7/8. FREQ_GET answers 0, so the kernel reads the PLLs.
+- **c11** (p9 setup + `s8lit=1690000 s8big=1703000`, 14 min, scripted
+  swipes): kernel raised Mongoose 1066 -> 1703 MHz (PLL read back 1703);
+  TMU 45 C at start, max 77 C, mostly 56-70 C; guard never stepped down. No
+  panic, clean autoreset. Presenter copy (scale) 9.4 ms vs 14 ms in p9,
+  snapshot 4.4 vs 5.4 ms. The frame rate is not comparable: this time the
+  display was still on at the lock screen when the scripted Home press came
+  (in p9 it was off and Home woke it), and iOS barely redrew during the
+  swipes (backboardd/SpringBoard idle in mach_msg), so the swipe script hit
+  another UI state. Smoothness still needs a hand test.
+
 ## Open work
 
 1. Boot the latest kernel/loader: does the frame-done copy remove the tearing,

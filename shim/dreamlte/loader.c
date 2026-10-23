@@ -310,6 +310,61 @@ static void rtc_bootarg(volatile struct boot_args *ba, uint64_t raw)
 	ba->CommandLine[at] = 0;
 }
 
+/* Words for " s8acpm=" (hex, dot-separated), appended to the boot-args. */
+static char acpm_line[200];
+static int acpm_len;
+
+static void acpm_word(uint32_t v)
+{
+	char num[9];
+	int n = 0;
+	do {
+		num[n++] = "0123456789abcdef"[v & 0xf];
+		v >>= 4;
+	} while (v && n < 8);
+	if (acpm_len + n + 1 >= (int)sizeof(acpm_line))
+		return;
+	if (acpm_len)
+		acpm_line[acpm_len++] = '.';
+	while (n)
+		acpm_line[acpm_len++] = num[--n];
+}
+
+static void append_bootarg(volatile struct boot_args *ba, const char *key, const char *val, int len)
+{
+	int at = 0, k = 0;
+	while (at < BOOT_LINE_LENGTH && ba->CommandLine[at])
+		at++;
+	while (key[k])
+		k++;
+	if (!len || at + k + len >= BOOT_LINE_LENGTH)
+		return;
+	for (int i = 0; i < k; i++)
+		ba->CommandLine[at++] = key[i];
+	for (int i = 0; i < len; i++)
+		ba->CommandLine[at++] = val[i];
+	ba->CommandLine[at] = 0;
+}
+
+/* Decimal value of " key=" in the boot-args, or 0. */
+static uint32_t cmdline_u32(const volatile char *line, const char *key)
+{
+	for (int i = 0; i < BOOT_LINE_LENGTH && line[i]; i++) {
+		if (i && line[i - 1] != ' ')
+			continue;
+		int k = 0;
+		while (key[k] && i + k < BOOT_LINE_LENGTH && line[i + k] == key[k])
+			k++;
+		if (key[k] || i + k >= BOOT_LINE_LENGTH || line[i + k] != '=')
+			continue;
+		uint32_t v = 0;
+		for (int j = i + k + 1; j < BOOT_LINE_LENGTH && line[j] >= '0' && line[j] <= '9'; j++)
+			v = v * 10 + (uint32_t)(line[j] - '0');
+		return v;
+	}
+	return 0;
+}
+
 #if MNGS_DIAG
 /*
  * Experiment build (LOADER_CFLAGS=-DMNGS_DIAG=1): run the Mongoose
@@ -542,6 +597,9 @@ uint64_t dl_main(uintptr_t dtb, uint64_t el, uint64_t sctlr)
 	out("\n");
 	ufs_probe(kv, out, UFS_PROBE_DMA);
 	rtc_bootarg(ba, pmic_init(kv, out));
+	/* s8lit=<kHz>: A53 clock (S-Boot leaves 1053 MHz; levels in pmic.c). */
+	acpm_cpu_clocks(cmdline_u32(p->cmdline, "s8lit"), acpm_word);
+	append_bootarg(ba, " s8acpm=", acpm_line, acpm_len);
 	clean(ba_pa, ba_pa + PAGE_SIZE);
 	touch_probe(kv, out);
 	battery_probe(kv, out);

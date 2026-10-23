@@ -14,3 +14,5 @@ shim/a5xelte/out4k/
 shim/a5xelte/outxnu/
 shim/dreamlte/out/
 logs/
+# Samsung ACPM DVFS plugin blob (tools/dreamlte/fetch-acpm-fw.sh)
+shim/dreamlte/firmware/
