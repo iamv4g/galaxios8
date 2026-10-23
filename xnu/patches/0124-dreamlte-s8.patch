@@ -800,7 +800,7 @@ index deccec2..4c34bce 100644
  #else
  			printf("Allowing spawn of iOS binary %s since it has "
 diff --git iokit/Kernel/IOPlatformExpert.cpp iokit/Kernel/IOPlatformExpert.cpp
-index 7a32a23..13e62e5 100644
+index 7a32a23..4e20b25 100644
 --- a/iokit/Kernel/IOPlatformExpert.cpp
 +++ b/iokit/Kernel/IOPlatformExpert.cpp
 @@ -61,6 +61,8 @@ extern "C" {
@@ -812,7 +812,19 @@ index 7a32a23..13e62e5 100644
  #include <sys/sysctl.h>
  }
  
-@@ -1366,6 +1368,15 @@ PEGetUTCTimeOfDay(clock_sec_t * secs, clock_usec_t * usecs)
+@@ -1097,6 +1099,11 @@ skip_to_haltRestart:
+ 		// Implementors of this function will check the type and take action accordingly
+ 		return gIOPlatform->haltRestart(type);
+ 	} else {
++#if defined(ARM64_BOARD_CONFIG_A5XELTE)
++		if (PE_halt_restart != NULL) {
++			return (*PE_halt_restart)(type);
++		}
++#endif
+ 		return -1;
+ 	}
+ }
+@@ -1366,6 +1373,15 @@ PEGetUTCTimeOfDay(clock_sec_t * secs, clock_usec_t * usecs)
  	if (gIOPlatform) {
  		gIOPlatform->getUTCTimeOfDay(secs, &nsecs);
  	}
@@ -946,7 +958,7 @@ index 9969739..0535b28 100644
  	poll();
  	if (fReal) {
 diff --git iokit/Kernel/arm/SweetCPU.cpp iokit/Kernel/arm/SweetCPU.cpp
-index 55d0057..73c1ca4 100644
+index 55d0057..c2e7a72 100644
 --- a/iokit/Kernel/arm/SweetCPU.cpp
 +++ b/iokit/Kernel/arm/SweetCPU.cpp
 @@ -17,6 +17,9 @@
@@ -959,7 +971,7 @@ index 55d0057..73c1ca4 100644
  
  extern "C" void sweet_secondary_entry(void);
  extern "C" boolean_t sweet_cpu_signal_is_enabled(unsigned int cpu);
-@@ -66,6 +69,361 @@ public:
+@@ -66,6 +69,376 @@ public:
  
  OSDefineMetaClassAndStructors(SweetCPU, IOCPU);
  
@@ -1225,6 +1237,21 @@ index 55d0057..73c1ca4 100644
 +}
 +
 +static void
++s8_wdt_thread(void *arg __unused, wait_result_t wr __unused)
++{
++	volatile uint32_t *wdt = (volatile uint32_t *)ml_io_map(0x10060000, 0x1000);
++	if (wdt == NULL) {
++		thread_terminate(current_thread());
++		return;
++	}
++	IOLog("S8 WDT: kicking every 10 s (WTCON 0x%x WTDAT %u WTCNT %u)\n", wdt[0], wdt[1], wdt[2]);
++	for (;;) {
++		wdt[2] = wdt[1];                 /* WTCNT = WTDAT */
++		IOSleep(10000);
++	}
++}
++
++static void
 +s8_dvfs_thread(void *arg __unused, wait_result_t wr __unused)
 +{
 +	uint32_t big_khz = 0, lit_khz = 0, fbig = 0, flit = 0;
@@ -1321,7 +1348,7 @@ index 55d0057..73c1ca4 100644
  bool
  SweetCPU::start(IOService *provider)
  {
-@@ -84,8 +442,15 @@ SweetCPU::start(IOService *provider)
+@@ -84,8 +457,15 @@ SweetCPU::start(IOService *provider)
  #if defined(A5XELTE)
  	/* Linux's Exynos7580 DT: logical 0..3 = MPIDR 0..3;
  	 * logical 4..7 = MPIDR 0x100..0x103. */
@@ -1337,7 +1364,7 @@ index 55d0057..73c1ca4 100644
  	if (cpu->phys_id != expected_mpidr ||
  	    topology->num_cpus > SWEET_SMP_MAX_CPUS) {
  		panic(CPU_PORT_NAME " CPU: unsupported topology cpu=%u mpidr=0x%x count=%u",
-@@ -168,9 +533,9 @@ SweetCPU::startAll(void *arg __unused, wait_result_t result __unused)
+@@ -168,9 +548,9 @@ SweetCPU::startAll(void *arg __unused, wait_result_t result __unused)
  		}
  		IOSleep(1);
  	}
@@ -1350,7 +1377,7 @@ index 55d0057..73c1ca4 100644
  	}
  	for (unsigned int i = 0; i < topology->num_cpus; i++) {
  		SweetCPU *cpu = __atomic_load_n(&sweet_cpus[i], __ATOMIC_ACQUIRE);
-@@ -189,8 +554,13 @@ SweetCPU::startAll(void *arg __unused, wait_result_t result __unused)
+@@ -189,8 +569,13 @@ SweetCPU::startAll(void *arg __unused, wait_result_t result __unused)
  			}
  			IOSleep(1);
  		}
@@ -1364,7 +1391,7 @@ index 55d0057..73c1ca4 100644
  	}
  	/* Publish exactly once, after every selected CPU has completed initCPU(). */
  	ml_cpu_init_completed();
-@@ -199,6 +569,18 @@ SweetCPU::startAll(void *arg __unused, wait_result_t result __unused)
+@@ -199,6 +584,23 @@ SweetCPU::startAll(void *arg __unused, wait_result_t result __unused)
  	ml_set_max_cpus(topology->max_cpu_id + 1);
  	IOLog(CPU_PORT_NAME " CPU: %u/%u CPUs initialized, SGI1 verified\n",
  	    topology->num_cpus, topology->num_cpus);
@@ -1378,12 +1405,17 @@ index 55d0057..73c1ca4 100644
 +				thread_deallocate(t);
 +			}
 +		}
++		uint32_t wdt_s = 0;
++		if (PE_parse_boot_argn("s8wdt", &wdt_s, sizeof(wdt_s)) && wdt_s &&
++		    kernel_thread_start(s8_wdt_thread, NULL, &t) == KERN_SUCCESS) {
++			thread_deallocate(t);
++		}
 +	}
 +#endif
  	thread_terminate(current_thread());
  }
  
-@@ -240,6 +622,11 @@ SweetCPU::initCPU(bool boot)
+@@ -240,6 +642,11 @@ SweetCPU::initCPU(bool boot)
  	kprintf(CPU_PORT_NAME " CPU: cpu=%u entered initCPU mpidr=0x%llx EL%llu IRQs=%u\n",
  	    getCPUNumber(), __builtin_arm_rsr64("MPIDR_EL1") & 0xffffULL,
  	    __builtin_arm_rsr64("CurrentEL") >> 2, ml_get_interrupts_enabled());
@@ -1395,7 +1427,7 @@ index 55d0057..73c1ca4 100644
  	__atomic_store_n(&initialized, 1, __ATOMIC_RELEASE);
  }
  
-@@ -279,13 +666,36 @@ SweetCPU::startCPU(vm_offset_t start_paddr, vm_offset_t arg_paddr)
+@@ -279,13 +686,36 @@ SweetCPU::startCPU(vm_offset_t start_paddr, vm_offset_t arg_paddr)
  {
  	const ml_topology_cpu_t *cpu = &ml_get_topology_info()->cpus[getCPUNumber()];
  	/* cpu_start() passes NULL,NULL: x20/x21 are set by LowResetVectorBase. */

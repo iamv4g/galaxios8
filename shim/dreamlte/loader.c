@@ -624,6 +624,37 @@ uint64_t dl_main(uintptr_t dtb, uint64_t el, uint64_t sctlr)
 	/* smp_probe(kv, out) proved the PMU power-up (boot 19); it leaves the
 	 * probed cores' PMU power on, which hid the 0 -> 0xF edge XNU needs. */
 	(void)smp_probe;
+	/* Test boots (s8autoreset): any reset from here on, including a hang
+	 * ended by the user's forced restart, should land in TWRP. Samsung's
+	 * reset reason, as s8_halt_restart writes it (INFORM2 POWER_RESET,
+	 * INFORM3 RECOVERY); XNU's own clean restart overwrites it. */
+	if (cmdline_u32(p->cmdline, "s8autoreset")) {
+		*(volatile uint32_t *)0x16480808UL = 0x12345678U;
+		*(volatile uint32_t *)0x1648080cUL = 0x12345674U;
+		__asm__ volatile("dsb sy");
+		out("reset reason preset: recovery\n");
+	}
+	/* s8wdt=<seconds>: arm the watchdog (DT watchdog@10060000, Samsung
+	 * s3c2410_wdt.c exynos8 variant) so a hang without a panic also resets;
+	 * XNU kicks it once its CPUs run (SweetCPU). OSCCLK 26 MHz / 256 / 128
+	 * = 793 Hz, so at most 82 s. PMU 0x408 / 0x40c bit 24 cleared: the
+	 * watchdog may reset the SoC (s3c2410wdt_mask_and_disable_reset). */
+	uint32_t wdt_s = cmdline_u32(p->cmdline, "s8wdt");
+	if (wdt_s) {
+		uint32_t count = wdt_s * 793U;
+		if (count > 0xffffU)
+			count = 0xffffU;
+		volatile uint32_t *wdt = (volatile uint32_t *)0x10060000UL;
+		wdt[0] = 0;					/* WTCON: stop */
+		wdt[1] = count;					/* WTDAT */
+		wdt[2] = count;					/* WTCNT */
+		*(volatile uint32_t *)0x16480408UL &= ~(1U << 24);
+		*(volatile uint32_t *)0x1648040cUL &= ~(1U << 24);
+		wdt[0] = (0xffU << 8) | (3U << 3) | (1U << 5) | 1U;	/* PRESCALE 255, DIV128, ENABLE, RSTEN */
+		__asm__ volatile("dsb sy");
+		kv("watchdog s", count / 793U);
+		out("\n");
+	}
 	fg = 0xff40ff40U;
 	out("\nJUMP TO XNU\n");
 	reserve_marker();

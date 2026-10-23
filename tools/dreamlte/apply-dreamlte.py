@@ -2244,3 +2244,70 @@ edit('osfmk/vm/vm_compressor.c', [
      '\n'
      '#if XNU_TARGET_OS_OSX && !defined(ARM64_BOARD_CONFIG_A5XELTE)\n', 1),
 ])
+
+# Panics before IOKit's platform expert exists (kmem_range_init with 2 GiB,
+# c14 and probably c17) spun forever: PEHaltRestart only reaches
+# PE_halt_restart through gIOPlatform->haltRestart, and returned -1 while
+# gIOPlatform was NULL, although pe_serial.c had already installed
+# s8_halt_restart with the console. Call it directly then, so an early panic
+# also resets (into TWRP with s8autoreset).
+edit('iokit/Kernel/IOPlatformExpert.cpp', [
+    ('skip_to_haltRestart:\n'
+     '\tif (gIOPlatform) {\n'
+     '\t\t// note that this will not necessarily halt or restart the system...\n'
+     '\t\t// Implementors of this function will check the type and take action accordingly\n'
+     '\t\treturn gIOPlatform->haltRestart(type);\n'
+     '\t} else {\n'
+     '\t\treturn -1;\n'
+     '\t}\n',
+     'skip_to_haltRestart:\n'
+     '\tif (gIOPlatform) {\n'
+     '\t\t// note that this will not necessarily halt or restart the system...\n'
+     '\t\t// Implementors of this function will check the type and take action accordingly\n'
+     '\t\treturn gIOPlatform->haltRestart(type);\n'
+     '\t} else {\n'
+     '#if defined(ARM64_BOARD_CONFIG_A5XELTE)\n'
+     '\t\tif (PE_halt_restart != NULL) {\n'
+     '\t\t\treturn (*PE_halt_restart)(type);\n'
+     '\t\t}\n'
+     '#endif\n'
+     '\t\treturn -1;\n'
+     '\t}\n', 1),
+])
+
+# Watchdog kicker for test boots: the loader arms the SoC watchdog with
+# s8wdt=<seconds> (at most 82 s); once all CPUs run, this thread reloads
+# WTCNT from WTDAT every 10 s. A hang that stops it ends in a watchdog reset,
+# and the loader's preset reset reason (s8autoreset) sends that into TWRP.
+edit('iokit/Kernel/arm/SweetCPU.cpp', [
+    ('static void\ns8_dvfs_thread(void *arg __unused, wait_result_t wr __unused)\n',
+     'static void\n'
+     's8_wdt_thread(void *arg __unused, wait_result_t wr __unused)\n'
+     '{\n'
+     '\tvolatile uint32_t *wdt = (volatile uint32_t *)ml_io_map(0x10060000, 0x1000);\n'
+     '\tif (wdt == NULL) {\n'
+     '\t\tthread_terminate(current_thread());\n'
+     '\t\treturn;\n'
+     '\t}\n'
+     '\tIOLog("S8 WDT: kicking every 10 s (WTCON 0x%x WTDAT %u WTCNT %u)\\n", wdt[0], wdt[1], wdt[2]);\n'
+     '\tfor (;;) {\n'
+     '\t\twdt[2] = wdt[1];                 /* WTCNT = WTDAT */\n'
+     '\t\tIOSleep(10000);\n'
+     '\t}\n'
+     '}\n'
+     '\n'
+     'static void\ns8_dvfs_thread(void *arg __unused, wait_result_t wr __unused)\n', 1),
+    ('\t\t\tif (kernel_thread_start(s8_dvfs_thread, NULL, &t) == KERN_SUCCESS) {\n'
+     '\t\t\t\tthread_deallocate(t);\n'
+     '\t\t\t}\n'
+     '\t\t}\n',
+     '\t\t\tif (kernel_thread_start(s8_dvfs_thread, NULL, &t) == KERN_SUCCESS) {\n'
+     '\t\t\t\tthread_deallocate(t);\n'
+     '\t\t\t}\n'
+     '\t\t}\n'
+     '\t\tuint32_t wdt_s = 0;\n'
+     '\t\tif (PE_parse_boot_argn("s8wdt", &wdt_s, sizeof(wdt_s)) && wdt_s &&\n'
+     '\t\t    kernel_thread_start(s8_wdt_thread, NULL, &t) == KERN_SUCCESS) {\n'
+     '\t\t\tthread_deallocate(t);\n'
+     '\t\t}\n', 1),
+])

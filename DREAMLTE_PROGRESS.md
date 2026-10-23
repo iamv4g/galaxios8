@@ -604,6 +604,24 @@ launchd logs, because the loader's pmsg copy is overwritten by the kernel):
 - Kernel with all fixes (DPP stages at 0xd2000000) building for the next
   DPP test.
 
+### Getting back to TWRP without a person (built, not yet tested)
+
+- Early panics (before IOKit's platform expert) spun forever:
+  `PEHaltRestart` returned -1 while `gIOPlatform` was NULL, although
+  `s8_halt_restart` was already installed with the console. 0124 now calls
+  `PE_halt_restart` directly in that case.
+- Loader, test boots only (`s8autoreset`): presets INFORM2/INFORM3 =
+  POWER_RESET/RECOVERY before jumping, so any later reset lands in TWRP
+  (maybe even the user's Vol Down + Power forced restart; untested).
+- Loader `s8wdt=<s>` arms the SoC watchdog (0x10060000, Samsung exynos8 wdt
+  variant: OSCCLK / 256 / 128 = 793 Hz, at most 82 s; PMU 0x408/0x40c bit
+  24 cleared); SweetCPU's `s8_wdt_thread` reloads WTCNT every 10 s once all
+  CPUs run. A hang without a panic then resets. Open question: what S-Boot
+  does after a watchdog reset (TWRP via INFORM3, or Samsung upload mode).
+- Images: `s8-wdt-test-boot.img` (512 MiB + s8wdt=80: the kicker must keep a
+  healthy boot alive), `s8-c19-boot.img` (2 GiB), `s8-c18-boot.img` (DPP);
+  all with s8autoreset=240 s8wdt=80.
+
 ## Open work
 
 1. Boot the latest kernel/loader: does the frame-done copy remove the tearing,
