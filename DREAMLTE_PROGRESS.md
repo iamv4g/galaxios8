@@ -743,6 +743,37 @@ at 0xd5000000. c30b record:
   (CREATE_BO, MMAP_BO, SUBMIT, WAIT_BO, GET_PARAM, GET_BO_OFFSET) so Mesa
   Panfrost can run on a Darwin `pan_kmod` + libdrm stand-in.
 
+### GPU milestone 2 (kernel driver): design, not built yet (2026-10-24)
+
+Planned XNU driver `S8Mali` (IOService on IOResources, IOMatchCategory
+S8Mali, boot-arg `s8gpu=1`; `s8gpu=2` adds a boot self-test), copied into
+the tree as `iokit/Kernel/arm/S8Mali.cpp` by apply-dreamlte.py with a
+`files.arm64` line and a KernelConfigTables personality:
+
+- Power: the loader leaves G3D on at 260 MHz (pmucal g3d_on + ACPM
+  dvfs_g3d) when `s8gpu` is set; the driver repeats g3d_on only if the PMU
+  status is not 0xf, then soft reset, TILER_CONFIG override, L2/shader/tiler
+  power-up, AS 0 in legacy LPAE mode (all as in c30b).
+- Memory: carve-out 0xd5000000-0xe3c00000 (outside XNU RAM, free of TWRP DT
+  reserved-memory): first 2 MiB page tables, the rest BOs; kernel mapping
+  `ml_io_map_unmappable(..., VM_WIMG_WCOMB)`; user mapping through
+  `clientMemoryForType` + `IOMemoryDescriptor::withPhysicalAddress`, the
+  client passes kIOMapWriteCombineCache.
+- GPU VA: one AS for all clients, BOs at [32 MiB, 4 GiB) as panfrost;
+  4-level Mali-LPAE tables; NOEXEC -> XN; HEAP BOs get full VA, first
+  32 MiB backed (grow-on-fault later); LOCK + FLUSH_PT after map/unmap.
+- Jobs: synchronous submit (FS requirement -> slot 0, else slot 1), polled
+  JOB_INT_RAWSTAT/MMU_INT_RAWSTAT, timeout -> hard stop + reset + re-init;
+  IRQs (59-61) and async fences later.
+- User client selectors mirror the panfrost UAPI: 0 GetParam, 1 CreateBO,
+  2 FreeBO, 3 Submit, 4 WaitBO, 5 GetBOOffset, 6 Madvise; then a libdrm
+  stand-in + Darwin `pan_kmod` for Mesa Panfrost (G71 is in Mesa's model
+  list, `pan_props.c`).
+
+Status: writing the driver source was stopped three times by the
+assistant's safety classifier (not a build or device problem). A truncated,
+never-compiled `tools/dreamlte/dreamlte_mali.cpp` is left uncommitted.
+
 ## Open work
 
 1. Boot the latest kernel/loader: does the frame-done copy remove the tearing,
