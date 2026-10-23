@@ -2627,3 +2627,27 @@ edit('iokit/KernelConfigTables.cpp', [
      "    \"     'IOMatchCategory' = S8Mali;\"\n"
      "    \"   },\"\n", 1),
 ])
+
+# Raw reads of /dev/rufsroot0 (physio, B_PHYS) panicked in memmove (c34: kernel data
+# abort, ESR 0x9600004f, far = the caller's buffer): for a physio buffer buf_map() returns
+# the user address, which the kernel may not touch directly. The strategy routine runs in
+# the caller's thread with the pages wired, so copy with copyout/copyin there.
+edit('bsd/dev/sweet_ufs.c', [
+    ('\tbool rd = buf_flags(bp) & B_READ;\n',
+     '\tbool rd = buf_flags(bp) & B_READ;\n'
+     '\tbool user = buf_flags(bp) & B_PHYS;  /* physio: vaddr is the caller\'s */\n', 1),
+    ('\t\t\tif (!error) {\n\t\t\t\tmemcpy(vaddr + done, (const char *)bounce + skip, want);\n\t\t\t}\n',
+     '\t\t\tif (!error && user) {\n'
+     '\t\t\t\terror = copyout((const char *)bounce + skip, (user_addr_t)(uintptr_t)(vaddr + done), want);\n'
+     '\t\t\t} else if (!error) {\n'
+     '\t\t\t\tmemcpy(vaddr + done, (const char *)bounce + skip, want);\n'
+     '\t\t\t}\n', 1),
+    ('\t\t\tif (!error) {\n\t\t\t\tmemcpy((char *)bounce + skip, vaddr + done, want);\n',
+     '\t\t\tif (!error && user) {\n'
+     '\t\t\t\terror = copyin((user_addr_t)(uintptr_t)(vaddr + done), (char *)bounce + skip, want);\n'
+     '\t\t\t}\n'
+     '\t\t\tif (!error && !user) {\n'
+     '\t\t\t\tmemcpy((char *)bounce + skip, vaddr + done, want);\n'
+     '\t\t\t}\n'
+     '\t\t\tif (!error) {\n', 1),
+])

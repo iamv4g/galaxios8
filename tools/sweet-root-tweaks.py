@@ -183,32 +183,62 @@ def reduce_effects(root):
     print('Reduce Transparency and Reduce Motion on')
 
 
-MALITEST_JOB = '/System/Library/LaunchDaemons/com.galaxios8.s8malitest.plist'
+GPU_TESTS = ('s8malitest', 's8gltest')
 
 
-def malitest(root, binary):
-    """Install tools/dreamlte/s8malitest (built and ad-hoc signed on the Mac)
-    as /usr/local/bin/s8malitest and a launchd job that runs it once at boot.
-    Results reach the kernel log through the S8Mali Report selector."""
-    dst = os.path.join(root, 'usr/local/bin/s8malitest')
+def gputests(root, outdir):
+    """Install the GPU tests built on the Mac (shim/dreamlte/out: s8malitest, s8gltest, ad-hoc
+    signed; research/mesa-ios/out/libOSMesa.8.dylib) into /usr/local and a launchd job per test
+    that runs it once at boot. Results reach the kernel log through the S8Mali Report selector."""
+    files = [(os.path.join(outdir, t), 'usr/local/bin/' + t) for t in GPU_TESTS]
+    files.append((os.path.join(outdir, 'libOSMesa.8.dylib'), 'usr/local/lib/libOSMesa.8.dylib'))
+    for src, rel in files:
+        dst = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copyfile(src, dst)
+        os.chown(dst, 0, 0)
+        os.chmod(dst, 0o755)
+        print('installed', '/' + rel)
+    path = os.path.join(root, 'System/Library/xpc/launchd.plist')
+    st = os.stat(path)
+    plist = load(path)
+    for t in GPU_TESTS:
+        plist['LaunchDaemons'][f'/System/Library/LaunchDaemons/com.galaxios8.{t}.plist'] = {
+            'Label': f'com.galaxios8.{t}',
+            'ProgramArguments': [f'/usr/local/bin/{t}'],
+            'RunAtLoad': True,
+            'UserName': 'root',
+            'StandardOutPath': f'/private/var/root/{t}.log',
+            'StandardErrorPath': f'/private/var/root/{t}.log',
+        }
+    save(path, plist, st.st_uid, st.st_gid, st.st_mode & 0o7777)
+    print('launchd jobs:', ', '.join('com.galaxios8.' + t for t in GPU_TESTS))
+
+
+def drop(root, outdir):
+    """Install s8drop (tools/dreamlte/s8drop.c) with a boot job, and remove the per-test jobs of
+    gputests(): from now on test programs come from the drop zone on USERDATA."""
+    dst = os.path.join(root, 'usr/local/bin/s8drop')
     os.makedirs(os.path.dirname(dst), exist_ok=True)
-    shutil.copyfile(binary, dst)
+    shutil.copyfile(os.path.join(outdir, 's8drop'), dst)
     os.chown(dst, 0, 0)
     os.chmod(dst, 0o755)
     path = os.path.join(root, 'System/Library/xpc/launchd.plist')
     st = os.stat(path)
     plist = load(path)
-    plist['LaunchDaemons'][MALITEST_JOB] = {
-        'Label': 'com.galaxios8.s8malitest',
-        'ProgramArguments': ['/usr/local/bin/s8malitest'],
+    jobs = plist['LaunchDaemons']
+    for t in GPU_TESTS:
+        jobs.pop(f'/System/Library/LaunchDaemons/com.galaxios8.{t}.plist', None)
+    jobs['/System/Library/LaunchDaemons/com.galaxios8.s8drop.plist'] = {
+        'Label': 'com.galaxios8.s8drop',
+        'ProgramArguments': ['/usr/local/bin/s8drop'],
         'RunAtLoad': True,
         'UserName': 'root',
-        'StandardOutPath': '/private/var/root/s8malitest.log',
-        'StandardErrorPath': '/private/var/root/s8malitest.log',
+        'StandardOutPath': '/private/var/root/s8drop.log',
+        'StandardErrorPath': '/private/var/root/s8drop.log',
     }
     save(path, plist, st.st_uid, st.st_gid, st.st_mode & 0o7777)
-    print('s8malitest installed, launchd job', MALITEST_JOB)
-
+    print('installed /usr/local/bin/s8drop and its boot job; GPU test jobs removed')
 
 if __name__ == '__main__':
     main()

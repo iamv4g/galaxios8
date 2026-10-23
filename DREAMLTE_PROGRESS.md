@@ -812,6 +812,62 @@ file). Images: 2 GiB, `cpus=8`, `sweetfb_scale=1`, c30b's boot-args without
   (installs it with a RunAtLoad launchd job; results in the kernel log as
   `S8 MALI: s8malitest report N`).
 
+### GPU milestone 3: the user client from iOS user space (c33, 2026-10-24)
+
+Root edited in place (`edit-live-root.sh LIVE.img gputests`: fsck OK before
+and after, 32 changed chunks written and verified): `/usr/local/bin/
+s8malitest`, `s8gltest`, `/usr/local/lib/libOSMesa.8.dylib`, a RunAtLoad
+launchd job each. c33 = c32's kernel, `s8mali=2 s8autoreset=300`.
+
+- **s8malitest (ad-hoc signed, launchd job as root) passed**: GetParam
+  GPU_ID 0x60a00001 / shaders 0x17771777; BOs at GPU VA 0x2000000 and
+  0x2010000 mapped write-combined into the process; one WRITE_VALUE job
+  (0x5eed0001 read back by the CPU); **2000 jobs from user space, 0 bad,
+  113 us per job** (IOKit call + synchronous submit); a 1440x2960x4 BO with
+  jobs writing its first and last word: ok. Kernel: "s8malitest closed: 3
+  BOs, 2002 submits, 2002 done".
+- s8gltest (Mesa OSMesa + Panfrost): `panfrost_drm_screen_create` returned
+  NULL (report 0x51 = 0), then the process was killed by jetsam (reason
+  namespace 1 code 7 = per-process memory limit; launchd jobs get a small
+  default limit), probably in softpipe. Cause of the NULL screen: Mesa's
+  model table matches GPU_PROD_ID exactly (G71 = 0x6000) but this r0p0
+  reports 0x60a0 (GPU_ID[23:20] arch rev 0xa); Linux panfrost compares
+  `& 0xf00f`. The libdrm stand-in now reports the masked id; s8gltest
+  raises its own jetsam limit (memorystatus_control, root) and copies
+  stderr (Mesa's messages) into the kernel log as reports 200+.
+
+### Mesa for iOS (built on the Mac, 2026-10-24)
+
+`tools/dreamlte/mesa/mk-mesa.sh` -> `research/mesa-ios/out/libOSMesa.8.dylib`
+(Mesa 25.0.7, OSMesa + gallium panfrost + softpipe, iOS arm64, minos 16.0,
+16 MB, depends only on libz, libSystem, IOKit, libc++). `patch-mesa.py`
+(asserted edits: dep_libdrm -> `tools/dreamlte/mesa/s8drm`, BO mmap/munmap
+through the user client, OSMesa takes Panfrost when S8Mali exists unless
+OSMESA_SOFTWARE=1). `s8drm/s8_drm.c`: panfrost ioctls -> S8Mali scalar
+selectors, syncobjs trivially signalled (submit is synchronous), no dma-buf
+export. Needs Homebrew bison 3 (keg-only) and a venv with meson/mako in
+research/mesa-ios.
+
+### Drop zone: tests without editing the root (c34, 2026-10-24)
+
+`tools/dreamlte/s8drop.c` (installed once: `edit-live-root.sh LIVE.img
+drop`, which also removes the gputests jobs) reads a small archive from
+raw USERDATA at **20 GiB** (after the 16 GiB HFS+ root, far from the log
+ring in the last 4 MiB) via /dev/rufsroot0, extracts it to
+/private/var/tmp/s8drop and runs the marked programs. `mkdrop.py` builds it,
+`drop.sh` writes and verifies it from TWRP (sda24 only). The drop copy of
+libOSMesa has install name @executable_path.
+
+- c34: **kernel panic** in s8drop's first pread: `memmove` from
+  `sweet_ufs_strategy` <- physio <- spec_read <- pread (ESR 0x9600004f, far =
+  the user buffer, x12 = 0x0100000cfeedfacf, the dylib's Mach-O header). A
+  physio buffer (B_PHYS) carries the caller's user address and the driver
+  copied into it with memcpy: every raw read of rufsroot0 from user space
+  panicked. Fixed in 0124 (copyout/copyin for B_PHYS). The flash of c34's
+  root edit first skipped all 7 chunks because a progress file of the earlier
+  manifest was still there; `edit-live-root.sh` now deletes it, and the 7
+  chunks were then written and verified.
+
 ## Open work
 
 1. Boot the latest kernel/loader: does the frame-done copy remove the tearing,

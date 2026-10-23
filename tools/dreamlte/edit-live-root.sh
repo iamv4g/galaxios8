@@ -11,7 +11,8 @@
 #   adb exec-out "dd if=/dev/block/sda24 bs=4194304 count=4096" > LIVE.img
 # STEP: launchd       remove the REMOVED_JOBS of tools/sweet-root-tweaks.py
 #       effects       Reduce Transparency + Reduce Motion
-#       malitest      install shim/dreamlte/out/s8malitest and its boot job
+#       gputests      install s8malitest, s8gltest and libOSMesa (shim/dreamlte/out) with boot jobs
+#       drop          install shim/dreamlte/out/s8drop (drop-zone runner), drop the gputests jobs
 # Output: LIVE.img.edited and LIVE.img.changed.json (only the 32 MiB chunks
 # that differ), for tools/dreamlte/flash-chunks.sh.
 set -euo pipefail
@@ -56,8 +57,10 @@ if step == 'launchd':
     t.launchd(root)
 elif step == 'effects':
     t.reduce_effects(root)
-elif step == 'malitest':
-    t.malitest(root, os.path.join(tools, '..', 'shim/dreamlte/out/s8malitest'))
+elif step == 'drop':
+    t.drop(root, os.path.join(tools, '..', 'shim/dreamlte/out'))
+elif step == 'gputests':
+    t.gputests(root, os.path.join(tools, '..', 'shim/dreamlte/out'))
 else:
     sys.exit('unknown step ' + step)
 PY
@@ -72,6 +75,8 @@ chmod 644 "$vm"
 VM
 
 limactl cp "s8:$vm" "$live.edited"
+# A new manifest: progress of an earlier flash-chunks.sh run must not skip its chunks.
+rm -f "$live.changed".*.progress
 python3 - "$live" "$live.edited" <<'PY'
 import hashlib, json, sys
 a, b = sys.argv[1], sys.argv[2]
