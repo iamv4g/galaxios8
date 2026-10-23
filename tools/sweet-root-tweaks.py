@@ -183,5 +183,32 @@ def reduce_effects(root):
     print('Reduce Transparency and Reduce Motion on')
 
 
+MALITEST_JOB = '/System/Library/LaunchDaemons/com.galaxios8.s8malitest.plist'
+
+
+def malitest(root, binary):
+    """Install tools/dreamlte/s8malitest (built and ad-hoc signed on the Mac)
+    as /usr/local/bin/s8malitest and a launchd job that runs it once at boot.
+    Results reach the kernel log through the S8Mali Report selector."""
+    dst = os.path.join(root, 'usr/local/bin/s8malitest')
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.copyfile(binary, dst)
+    os.chown(dst, 0, 0)
+    os.chmod(dst, 0o755)
+    path = os.path.join(root, 'System/Library/xpc/launchd.plist')
+    st = os.stat(path)
+    plist = load(path)
+    plist['LaunchDaemons'][MALITEST_JOB] = {
+        'Label': 'com.galaxios8.s8malitest',
+        'ProgramArguments': ['/usr/local/bin/s8malitest'],
+        'RunAtLoad': True,
+        'UserName': 'root',
+        'StandardOutPath': '/private/var/root/s8malitest.log',
+        'StandardErrorPath': '/private/var/root/s8malitest.log',
+    }
+    save(path, plist, st.st_uid, st.st_gid, st.st_mode & 0o7777)
+    print('s8malitest installed, launchd job', MALITEST_JOB)
+
+
 if __name__ == '__main__':
     main()

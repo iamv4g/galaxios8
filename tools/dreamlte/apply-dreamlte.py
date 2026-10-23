@@ -2606,3 +2606,24 @@ edit('iokit/Kernel/arm/SweetFramebuffer.cpp', [
      '\t\tIOLog("S8 DPP: no frame done within 40 ms of a flip (%u)\\n", s8_dpp_forced);\n'
      '\t}\n', 1),
 ])
+
+# GPU milestone 2: S8Mali, the Mali-G71 MP20 kernel driver (dreamlte_mali.cpp
+# next to this script), an IOService on IOResources started by boot-arg
+# s8mali=1 (s8mali=2 adds a boot self-test), with a user client for Mesa.
+(tree / 'iokit/Kernel/arm/S8Mali.cpp').write_text(
+    (Path(__file__).parent / 'dreamlte_mali.cpp').read_text())
+print('wrote iokit/Kernel/arm/S8Mali.cpp')
+edit('iokit/conf/files.arm64', [
+    ('iokit/Kernel/arm/SweetBattery.cpp                                optional iokitcpp\n',
+     'iokit/Kernel/arm/SweetBattery.cpp                                optional iokitcpp\n'
+     'iokit/Kernel/arm/S8Mali.cpp                                      optional iokitcpp\n', 1),
+])
+edit('iokit/KernelConfigTables.cpp', [
+    ("    \"     'IOMatchCategory' = SweetBattery;\"\n    \"   },\"\n#endif\n",
+     "    \"     'IOMatchCategory' = SweetBattery;\"\n    \"   },\"\n#endif\n"
+     "    \"   {\"\n"
+     "    \"     'IOClass'         = S8Mali;\"\n"
+     "    \"     'IOProviderClass' = IOResources;\"\n"
+     "    \"     'IOMatchCategory' = S8Mali;\"\n"
+     "    \"   },\"\n", 1),
+])

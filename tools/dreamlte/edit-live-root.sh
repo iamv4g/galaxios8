@@ -11,6 +11,7 @@
 #   adb exec-out "dd if=/dev/block/sda24 bs=4194304 count=4096" > LIVE.img
 # STEP: launchd       remove the REMOVED_JOBS of tools/sweet-root-tweaks.py
 #       effects       Reduce Transparency + Reduce Motion
+#       malitest      install shim/dreamlte/out/s8malitest and its boot job
 # Output: LIVE.img.edited and LIVE.img.changed.json (only the 32 MiB chunks
 # that differ), for tools/dreamlte/flash-chunks.sh.
 set -euo pipefail
@@ -55,6 +56,8 @@ if step == 'launchd':
     t.launchd(root)
 elif step == 'effects':
     t.reduce_effects(root)
+elif step == 'malitest':
+    t.malitest(root, os.path.join(tools, '..', 'shim/dreamlte/out/s8malitest'))
 else:
     sys.exit('unknown step ' + step)
 PY

@@ -770,9 +770,47 @@ the tree as `iokit/Kernel/arm/S8Mali.cpp` by apply-dreamlte.py with a
   stand-in + Darwin `pan_kmod` for Mesa Panfrost (G71 is in Mesa's model
   list, `pan_props.c`).
 
-Status: writing the driver source was stopped three times by the
-assistant's safety classifier (not a build or device problem). A truncated,
-never-compiled `tools/dreamlte/dreamlte_mali.cpp` is left uncommitted.
+Status (earlier session): writing the driver source was stopped three
+times by the assistant's safety classifier; finished on 2026-10-24 (below).
+
+### GPU milestone 2: S8Mali runs jobs inside XNU (c31-c32, 2026-10-24)
+
+`tools/dreamlte/dreamlte_mali.cpp` -> `iokit/Kernel/arm/S8Mali.cpp` (0124,
+`files.arm64`, KernelConfigTables personality on IOResources). Boot-arg is
+**`s8mali=`** (1 start, 2 + boot self-test), not `s8gpu=`: the loader appends
+its probe record under that name. Do not combine with `s8gpuprobe` (the
+loader probe ends with g3d_off). Built locally (`build-xnu-local.sh`); 0124
+is now regenerated on the Mac by `tools/dreamlte/regen-0124-local.sh`
+(reverses 0124 in the local tree, reruns apply-dreamlte.py, diffs through a
+temporary index; diff headers now carry a/ b/ prefixes, needed for the new
+file). Images: 2 GiB, `cpus=8`, `sweetfb_scale=1`, c30b's boot-args without
+`s8gpuprobe`, plus `s8mali=2 s8autoreset=180 s8wdt=80`.
+
+- c31: S-Boot leaves G3D on (PMU 0x3000f, PLL_G3D 0xa0a00412); the driver
+  refused the GPU: `(GPU_ID >> 16) != 0x6000` is wrong, Bifrost's product
+  field is 0x60a0 and panfrost/Mesa compare `& 0xf00f`. iOS booted normally
+  (443 execs, SpringBoard), autoreset to TWRP.
+- **c32 (fixed check): driver up, all self-tests passed on the phone:**
+  `GPU_ID 0x60a00001 shaders 0x17771777 L2 0x1 JS 0x7 AS 0xff MMU 0x2830
+  coherency 0x0, powered`; T1 one WRITE_VALUE job through the driver's own
+  page tables (status 1, word 0xc0ffee10); T2 chain of 64 jobs, 64/64 words;
+  T3 1000 jobs alternating slot 0/1, 0 bad, **22 us per job** (submit +
+  poll, synchronous); T4 write to unmapped VA 0x1000: MMU fault (AS0 fault
+  0x7c1003c2, status 0xc2), soft reset + re-init, the next job ok.
+  `registered (s8mali=2)`; iOS boot unaffected, autoreset to TWRP.
+- Driver facts: carve-out 0xd5000000-0xe3c00000 (2 MiB page tables, rest
+  BOs in 16 KiB units so user mappings work with 16K VM pages), kernel map
+  write-combined; one GPU AS for all clients, BO VA [32 MiB, 4 GiB) in 64 KiB
+  units; HEAP BOs back only the first 32 MiB (no grow-on-fault yet); jobs
+  synchronous and polled (no IRQs yet), 2 s timeout -> hard stop + reset;
+  the GPU stays powered (20 cores, 260 MHz) while the driver runs.
+- User client `S8MaliUserClient` (selectors 0-7: GetParam in panfrost
+  numbering, CreateBO, FreeBO, Submit, WaitBO, GetBOOffset, Madvise, Report;
+  `IOConnectMapMemory64(handle, kIOMapAnywhere | kIOMapWriteCombineCache)`).
+  Built, **not yet exercised from user space**: `tools/dreamlte/s8malitest.c`
+  (iOS arm64, ad-hoc signed) + `edit-live-root.sh LIVE.img malitest`
+  (installs it with a RunAtLoad launchd job; results in the kernel log as
+  `S8 MALI: s8malitest report N`).
 
 ## Open work
 
