@@ -50,6 +50,8 @@
 #include <sys/proc.h>
 
 extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+extern "C" kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
+extern "C" void thread_deallocate(thread_t);
 extern "C" vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size, unsigned int flags);
 #ifndef VM_WIMG_WCOMB
 #define VM_WIMG_WCOMB 0x6                 /* osfmk/arm/memory_types.h */
@@ -104,6 +106,13 @@ extern "C" vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t siz
 #define GPU_SHADER_PWRON        0x180
 #define GPU_TILER_PWRON         0x190
 #define GPU_L2_PWRON            0x1a0
+#define GPU_SHADER_PWROFF       0x1c0
+#define GPU_TILER_PWROFF        0x1d0
+#define GPU_L2_PWROFF           0x1e0
+#define GPU_SHADER_PWRTRANS     0x200
+#define GPU_TILER_PWRTRANS      0x210
+#define GPU_L2_PWRTRANS         0x220
+#define IDLE_OFF_TICKS          (26ULL * 200000)        /* cores off after 200 ms idle */
 #define GPU_COHERENCY_FEATURES  0x300
 #define GPU_THREAD_TLS_ALLOC    0x310
 #define GPU_STACK_PRESENT       0xe00
@@ -174,7 +183,9 @@ public:
 	uint64_t fVAMap[(VA_UNITS + 63) / 64];
 	uint64_t fTableMap[(TABLE_PAGES + 63) / 64];
 	uint32_t fFeat[48];             /* DRM_PANFROST_PARAM_* values */
-	uint32_t fJobs, fFaults, fResets;
+	uint32_t fJobs, fFaults, fResets, fPowerUps;
+	bool fPowered;                  /* L2, shader cores and tiler on, AS 0 set up */
+	uint64_t fLastUse;              /* mach_absolute_time of the last job */
 
 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
 
@@ -183,6 +194,8 @@ public:
 
 	bool powerDomainOn(void);
 	bool hwInit(void);
+	void powerDown(void);
+	static void idleThread(void *arg, wait_result_t wr);
 	bool waitReg(uint32_t off, uint32_t mask, uint32_t want, uint32_t us);
 	void asCommand(uint32_t cmd);
 	void asLockFlush(uint64_t va, uint64_t size, uint32_t cmd);
@@ -389,7 +402,48 @@ S8Mali::hwInit(void)
 		IOLog("S8 MALI: power-up incomplete: L2 0x%x shaders 0x%x tiler 0x%x\n",
 		    rd(GPU_L2_READY), rd(GPU_SHADER_READY), rd(GPU_TILER_READY));
 	}
+	fPowered = ok;
 	return ok;
+}
+
+/*
+ * Idle: shader cores and tiler off, then the L2 (kbase's order). The G3D domain and the
+ * GPU_CONTROL block stay on; the next submit brings everything back with hwInit() (soft
+ * reset, power-up, AS 0), the path the fault recovery already uses. While the cores are off
+ * no MMU command is issued (mapRange/unmapRange skip the flush; hwInit flushes all).
+ * Called with fLock held and no job running (submits are synchronous).
+ */
+void
+S8Mali::powerDown(void)
+{
+	if (!fPowered) {
+		return;
+	}
+	wr(GPU_SHADER_PWROFF, rd(GPU_SHADER_PRESENT));
+	wr(GPU_TILER_PWROFF, rd(GPU_TILER_PRESENT));
+	bool ok = waitReg(GPU_SHADER_PWRTRANS, 0xffffffffu, 0, 20000) &&
+	    waitReg(GPU_TILER_PWRTRANS, 0xffffffffu, 0, 20000);
+	wr(GPU_L2_PWROFF, rd(GPU_L2_PRESENT));
+	ok = waitReg(GPU_L2_PWRTRANS, 0xffffffffu, 0, 20000) && ok;
+	if (!ok) {
+		IOLog("S8 MALI: power-down incomplete: shaders 0x%x tiler 0x%x L2 0x%x\n",
+		    rd(GPU_SHADER_READY), rd(GPU_TILER_READY), rd(GPU_L2_READY));
+	}
+	fPowered = false;
+}
+
+void
+S8Mali::idleThread(void *arg, wait_result_t wr __unused)
+{
+	S8Mali *gpu = (S8Mali *)arg;
+	for (;;) {
+		IOSleep(100);
+		IOLockLock(gpu->fLock);
+		if (gpu->fPowered && mach_absolute_time() - gpu->fLastUse > IDLE_OFF_TICKS) {
+			gpu->powerDown();
+		}
+		IOLockUnlock(gpu->fLock);
+	}
 }
 
 void
@@ -475,7 +529,9 @@ S8Mali::mapRange(uint64_t va, uint64_t pa, uint64_t size, bool noexec)
 		l3[((va + off) >> 12) & 0x1ff] = (pa + off) | PTE_LEAF | (noexec ? PTE_XN : 0);
 	}
 	s8_dsb();
-	asLockFlush(va, size, AS_CMD_FLUSH_PT);
+	if (fPowered) {
+		asLockFlush(va, size, AS_CMD_FLUSH_PT);
+	}
 	return true;
 }
 
@@ -489,7 +545,7 @@ S8Mali::unmapRange(uint64_t va, uint64_t size)
 		}
 	}
 	s8_dsb();
-	if (size != 0) {
+	if (size != 0 && fPowered) {
 		asLockFlush(va, size, AS_CMD_FLUSH_PT);
 	}
 }
@@ -578,6 +634,13 @@ S8Mali::submit(uint64_t jc, uint32_t req)
 	uint32_t js = JS(slot);
 	uint32_t sh = rd(GPU_SHADER_PRESENT);
 
+	if (!fPowered) {
+		fPowerUps++;
+		if (!hwInit()) {
+			return 0x03;
+		}
+	}
+	fLastUse = mach_absolute_time();
 	fJobs++;
 	wr(JOB_INT_CLEAR, done | fail);
 	wr(MMU_INT_CLEAR, 0x10001);
@@ -618,6 +681,7 @@ S8Mali::submit(uint64_t jc, uint32_t req)
 		}
 	}
 	wr(JOB_INT_CLEAR, done | fail);
+	fLastUse = mach_absolute_time();
 	if (raw & done) {
 		return 0x01;
 	}
@@ -715,10 +779,24 @@ S8Mali::selfTest(void)
 	    st4, fResets - resets, st4b, dk[0], t4 ? "ok" : "FAIL");
 	ok = ok && t4;
 
+	/* T5: cores powered off (idle), then a job: it must power them up again */
+	powerDown();
+	uint32_t ups = fPowerUps;
+	dk[0] = 0;
+	s8_write_value_job(jk, 0, 1, data->va, 0xc0ffee12u);
+	uint64_t p0 = mach_absolute_time();
+	uint32_t st5 = submit(jobs->va, 0);
+	uint64_t up_us = s8_ticks_us(mach_absolute_time() - p0);
+	bool t5 = st5 == 1 && dk[0] == 0xc0ffee12u && fPowerUps == ups + 1 && fPowered;
+	IOLog("S8 MALI: T5 power-up on submit: status 0x%x word 0x%x, %llu us -> %s\n",
+	    st5, dk[0], up_us, t5 ? "ok" : "FAIL");
+	ok = ok && t5;
+
 	boFree(jobs);
 	boFree(data);
-	snprintf(summary, sizeof(summary), "T1 %s T2 %s T3 %s (%llu us/job) T4 %s",
-	    t1 ? "ok" : "fail", t2 ? "ok" : "fail", t3 ? "ok" : "fail", us / 1000, t4 ? "ok" : "fail");
+	snprintf(summary, sizeof(summary), "T1 %s T2 %s T3 %s (%llu us/job) T4 %s T5 %s (%llu us)",
+	    t1 ? "ok" : "fail", t2 ? "ok" : "fail", t3 ? "ok" : "fail", us / 1000, t4 ? "ok" : "fail",
+	    t5 ? "ok" : "fail", up_us);
 	setProperty("S8MaliSelfTest", summary);
 	IOLog("S8 MALI: self-test %s: %s\n", ok ? "passed" : "FAILED", summary);
 	return ok;
@@ -779,6 +857,13 @@ S8Mali::start(IOService *provider)
 	setProperty("ShaderPresent", fFeat[2], 32);
 	setProperty("S8MaliPool", POOL_SIZE, 64);
 	setProperty(kIOUserClientClassKey, "S8MaliUserClient");
+	uint32_t idle = 1;
+	PE_parse_boot_argn("s8maliidle", &idle, sizeof(idle));
+	thread_t t;
+	fLastUse = mach_absolute_time();
+	if (idle && kernel_thread_start((thread_continue_t)idleThread, this, &t) == KERN_SUCCESS) {
+		thread_deallocate(t);
+	}
 	registerService();
 	IOLog("S8 MALI: registered (s8mali=%u)%s\n", mode, tested ? "" : ", self-test failed");
 	return true;
@@ -826,8 +911,8 @@ S8MaliUserClient::clientClose(void)
 {
 	char name[32];
 	proc_selfname(name, sizeof(name));
-	IOLog("S8 MALI: %s closed: %u BOs, %u submits, %u done; GPU totals %u jobs, %u faults, %u resets\n",
-	    name, fBOs, fSubmits, fDone, fGPU->fJobs, fGPU->fFaults, fGPU->fResets);
+	IOLog("S8 MALI: %s closed: %u BOs, %u submits, %u done; GPU totals %u jobs, %u faults, %u resets, %u power-ups\n",
+	    name, fBOs, fSubmits, fDone, fGPU->fJobs, fGPU->fFaults, fGPU->fResets, fGPU->fPowerUps);
 	freeAll();
 	terminate();
 	return kIOReturnSuccess;

@@ -13,6 +13,8 @@
  *       to the caller): count, microseconds per frame
  *    9  soak, 90 s of FBO frames: frames, max microseconds of one frame
  *   10  soak: wrong probe pixels (glReadPixels of one pixel every 50 frames), checks
+ *   12  idle power-down: 5 times (400 ms pause, then one checked FBO frame): good frames,
+ *       wrong pixels
  *    7  memorystatus_control (raise the jetsam limit to 1 GiB): return value, errno
  *  200+ stderr (Mesa's messages), 16 bytes per report
  *  400+ on SIGABRT/SIGSEGV/SIGBUS: frame i, (image: 0 s8gltest, 1 libOSMesa, 2 other) << 56 |
@@ -280,6 +282,22 @@ main(void)
 			soak_max = dt > soak_max ? dt : soak_max;
 		}
 	}
+	/* the driver powers the cores off after 200 ms idle; each frame must bring them back */
+	uint64_t idle_good = 0, idle_bad = 0;
+	for (int i = 0; i < 5 && fbo_frames; i++) {
+		usleep(400000);
+		glClearColor(0, 1, 0, 1);
+		glClear(GL_COLOR_BUFFER_BIT);
+		uint32_t a = 0;
+		glReadPixels(FW / 2, FH / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, &a);
+		if (a == GREEN) {
+			idle_good++;
+		} else {
+			idle_bad++;
+		}
+	}
+	report(12, idle_good, idle_bad);
+	ok = ok && idle_good == 5;
 	report(8, fbo_frames, fbo_us);
 	report(9, soak, soak_max);
 	report(10, soak_bad, soak_checks);

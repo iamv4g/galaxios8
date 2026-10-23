@@ -803,7 +803,7 @@ file). Images: 2 GiB, `cpus=8`, `sweetfb_scale=1`, c30b's boot-args without
   write-combined; one GPU AS for all clients, BO VA [32 MiB, 4 GiB) in 64 KiB
   units; HEAP BOs back only the first 32 MiB (no grow-on-fault yet); jobs
   synchronous and polled (no IRQs yet), 2 s timeout -> hard stop + reset;
-  the GPU stays powered (20 cores, 260 MHz) while the driver runs.
+  cores powered only while in use since c41 (the G3D domain stays on).
 - User client `S8MaliUserClient` (selectors 0-7: GetParam in panfrost
   numbering, CreateBO, FreeBO, Submit, WaitBO, GetBOOffset, Madvise, Report;
   `IOConnectMapMemory64(handle, kIOMapAnywhere | kIOMapWriteCombineCache)`).
@@ -905,6 +905,14 @@ iOS app or CoreAnimation using it (OSMesa renders off-screen).
   (the one fault is the self-test's T4). Slowest frame 1.14 s (once; not
   investigated: boot-time CPU load, shader compile or the 1 ms IOSleep after
   2000 polls). DVFS: 67 C. iOS booted and autoreset as usual.
+- c41 (idle power management): the driver powers shader cores, tiler and L2
+  off after 200 ms without a job (idle thread, `s8maliidle=0` disables it)
+  and the next submit brings them back through hwInit (soft reset, power-up,
+  AS 0); MMU flushes are skipped while off. Self-test **T5: power-down, then
+  a job: ok, 50 us** including the power-up. s8gltest test 12 (5 x 400 ms
+  pause, then a checked frame): 5/5; soak 58403 frames, 0 wrong of 1169
+  checks; 121984 submits all done; 13 power-ups; no fault apart from T4.
+  Slowest frame 1.24 s (again once per run; open).
 
 ## Open work
 
