@@ -1434,7 +1434,7 @@ index 55d0057..73c1ca4 100644
  	int32_t rc = sweet_psci_cpu_on(cpu->phys_id, entry, getCPUNumber());
  	IOLog(CPU_PORT_NAME " CPU: cpu=%u PSCI CPU_ON rc=%d\n", getCPUNumber(), rc);
 diff --git iokit/Kernel/arm/SweetFramebuffer.cpp iokit/Kernel/arm/SweetFramebuffer.cpp
-index 356ff51..0da8894 100644
+index 356ff51..6dbd557 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -48,6 +48,7 @@ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
@@ -1496,7 +1496,7 @@ index 356ff51..0da8894 100644
  	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
  
  	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
-@@ -302,6 +316,281 @@ get32(const uint8_t *p, uint32_t off)
+@@ -302,6 +316,424 @@ get32(const uint8_t *p, uint32_t off)
  	return v;
  }
  
@@ -1517,8 +1517,8 @@ index 356ff51..0da8894 100644
 +sweet_fb_dpu_dump(void)
 +{
 +	vm_offset_t dec = ml_io_map(0x12860000, 0x2000);
-+	vm_offset_t dma = ml_io_map(0x12850000, 0x7000);
-+	vm_offset_t dpp = ml_io_map(0x128B0000, 0x7000);
++	vm_offset_t dpp = ml_io_map(0x12850000, 0x7000);
++	vm_offset_t dma = ml_io_map(0x128B0000, 0x7000);
 +	if (dec == 0 || dma == 0 || dpp == 0) {
 +		return;
 +	}
@@ -1531,7 +1531,7 @@ index 356ff51..0da8894 100644
 +		    S8_R(b, 0x14), S8_R(b, 0x18), S8_R(b, 0x1c));
 +	}
 +	IOLog("S8 DPU: dma version 0x%x ch_map 0x%x glb 0x%x\n",
-+	    S8_R(dpp, 0), S8_R(dpp, 4), S8_R(dpp, 0x40));
++	    S8_R(dma, 0), S8_R(dma, 4), S8_R(dma, 0x40));
 +	for (uint32_t c = 0; c < 6; c++) {
 +		vm_offset_t i = dma + 0x1000 + c * 0x1000, d = dpp + 0x1000 + c * 0x1000;
 +		IOLog("S8 DPU: ch%u idma en 0x%x in 0x%x out 0x%x src 0x%x off 0x%x img 0x%x y 0x%x"
@@ -1737,6 +1737,143 @@ index 356ff51..0da8894 100644
 +static int sweet_fb_ready = -1, sweet_fb_busy = -1;
 +static uint64_t sweet_fb_panel_ticks, sweet_fb_panel_copies;
 +
++extern "C" vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
++static bool sweet_fb_dpp;
++static vm_offset_t s8_vgf_dma, s8_vgf_dpp, s8_dpp_decon;
++static uint64_t sweet_fb_stage_phys[2] = { 0xd0000000ULL, 0xd1000000ULL };
++static uint32_t s8_dpp_win_start, s8_dpp_win_end, s8_dpp_win_count, s8_dpp_path1;
++
++/* dpp_coef.h table 0 ("Ratio <= 65536"), phases 0..8 */
++static const int16_t s8_dpp_hcoef[9][8] = {
++	{  0,  0,   0, 128,   0,   0,  0,  0 },
++	{ -1,  2,  -6, 127,   7,  -2,  1,  0 },
++	{ -1,  4, -12, 125,  16,  -5,  1,  0 },
++	{ -1,  5, -15, 120,  25,  -8,  2,  0 },
++	{ -1,  6, -18, 114,  35, -10,  3, -1 },
++	{ -1,  6, -20, 107,  46, -13,  4, -1 },
++	{ -2,  7, -21,  99,  57, -16,  5, -1 },
++	{ -1,  6, -20,  89,  68, -18,  5, -1 },
++	{ -1,  6, -20,  79,  79, -20,  6, -1 },
++};
++static const int16_t s8_dpp_vcoef[9][4] = {
++	{  0, 128,   0,  0 },
++	{ -4, 127,   5,  0 },
++	{ -6, 124,  11, -1 },
++	{ -8, 118,  19, -1 },
++	{ -8, 111,  27, -2 },
++	{ -8, 102,  37, -3 },
++	{ -8,  92,  48, -4 },
++	{ -7,  81,  59, -5 },
++	{ -6,  70,  70, -6 },
++};
++
++#define S8_WIN5(off) (0x1000 + 5 * 0x30 + (off))
++
++static void
++sweet_fb_dpp_flip(int b)
++{
++	uint32_t pa = (uint32_t)sweet_fb_stage_phys[b];
++	S8_R(s8_vgf_dma, 0x40) = pa;                     /* IN_BASE_ADDR_Y */
++	S8_R(s8_vgf_dma, 0x44) = pa;                     /* IN_BASE_ADDR_C */
++	__asm__ volatile ("dsb sy" ::: "memory");
++	S8_R(s8_vgf_dma, 0) |= 1u << 4;                  /* SFR_UPDATE_FORCE */
++}
++
++static void
++sweet_fb_dpp_restore(void)
++{
++	S8_R(s8_dpp_decon, 0x218) = s8_dpp_path1;
++	S8_R(s8_dpp_decon, S8_WIN5(0x08)) = s8_dpp_win_start;
++	S8_R(s8_dpp_decon, S8_WIN5(0x0c)) = s8_dpp_win_end;
++	S8_R(s8_dpp_decon, S8_WIN5(0x1c)) = s8_dpp_win_count;
++	S8_R(s8_dpp_decon, 0x60) |= (1u << 31) | (1u << 5);
++}
++
++/* Window 5 from G0 (1:1 panel copy) to VGF0 scaling sw x sh to dw x dh at x0. */
++static bool
++sweet_fb_dpp_start(uint32_t sw, uint32_t sh, uint32_t dw, uint32_t dh, uint32_t x0)
++{
++	s8_vgf_dma = ml_io_map(0x128B5000, 0x1000);
++	s8_vgf_dpp = ml_io_map(0x12855000, 0x1000);
++	s8_dpp_decon = ml_io_map(0x12860000, 0x2000);
++	vm_offset_t g0 = ml_io_map(0x128B1000, 0x1000);
++	if (s8_vgf_dma == 0 || s8_vgf_dpp == 0 || s8_dpp_decon == 0 || g0 == 0) {
++		return false;
++	}
++	s8_dpp_path1 = S8_R(s8_dpp_decon, 0x218);
++	s8_dpp_win_start = S8_R(s8_dpp_decon, S8_WIN5(0x08));
++	s8_dpp_win_end = S8_R(s8_dpp_decon, S8_WIN5(0x0c));
++	s8_dpp_win_count = S8_R(s8_dpp_decon, S8_WIN5(0x1c));
++	IOLog("S8 DPP: before path0 0x%x path1 0x%x win5 0x%x 0x%x 0x%x 0x%x; G0 en 0x%x in 0x%x "
++	    "y 0x%x; VGF0 en 0x%x dpp en 0x%x\n", S8_R(s8_dpp_decon, 0x214), s8_dpp_path1,
++	    S8_R(s8_dpp_decon, S8_WIN5(0)), s8_dpp_win_start, s8_dpp_win_end, s8_dpp_win_count,
++	    S8_R(g0, 0), S8_R(g0, 8), S8_R(g0, 0x40), S8_R(s8_vgf_dma, 0), S8_R(s8_vgf_dpp, 0));
++
++	/* DMA: as G0 (bus, QoS, deadlock, gating, recovery), then format and size. */
++	for (uint32_t off = 0x34; off <= 0x38; off += 4) {
++		S8_R(s8_vgf_dma, off) = S8_R(g0, off);
++	}
++	for (uint32_t off = 0x50; off <= 0x5c; off += 4) {
++		S8_R(s8_vgf_dma, off) = S8_R(g0, off);
++	}
++	S8_R(s8_vgf_dma, 0) |= 3u << 9;                  /* SFR, SRAM clock gate enable */
++	S8_R(s8_vgf_dma, 0x0c) = 0xffu << 24;            /* OUT_CON: frame alpha */
++	S8_R(s8_vgf_dma, 0x08) = (S8_R(g0, 0x08) & ~((0x1fu << 11) | (3u << 8) | (1u << 7) |
++	    (1u << 6) | (1u << 4) | (1u << 3))) | (4u << 11);   /* XRGB8888 */
++	S8_R(s8_vgf_dma, 0x10) = sh << 16 | sw;          /* SRC_SIZE */
++	S8_R(s8_vgf_dma, 0x14) = 0;                      /* SRC_OFFSET */
++	S8_R(s8_vgf_dma, 0x18) = sh << 16 | sw;          /* IMG_SIZE */
++	S8_R(s8_vgf_dma, 0x40) = (uint32_t)sweet_fb_stage_phys[0];
++	S8_R(s8_vgf_dma, 0x44) = (uint32_t)sweet_fb_stage_phys[0];
++
++	/* DPP: RGB, per-frame alpha, sizes, ratios, coefficients. */
++	S8_R(s8_vgf_dpp, 0) |= 7u << 8;                  /* clock gate enable */
++	S8_R(s8_vgf_dpp, 0x08) &= ~((7u << 16) | (1u << 11) | (1u << 10));
++	S8_R(s8_vgf_dpp, 0x18) = sh << 16 | sw;          /* IMG_SIZE */
++	S8_R(s8_vgf_dpp, 0x2c) = dh << 16 | dw;          /* SCALED_IMG_SIZE */
++	S8_R(s8_vgf_dpp, 0x44) = (uint32_t)(((uint64_t)sw << 20) / dw);
++	S8_R(s8_vgf_dpp, 0x48) = (uint32_t)(((uint64_t)sh << 20) / dh);
++	for (uint32_t i = 0; i < 9; i++) {
++		for (uint32_t k = 0; k < 2; k++) {
++			for (uint32_t j = 0; j < 8; j++) {
++				S8_R(s8_vgf_dpp, 0x290 + i * 4 + j * 0x24 + k * 0x200) = (uint32_t)(int32_t)s8_dpp_hcoef[i][j];
++			}
++			for (uint32_t j = 0; j < 4; j++) {
++				S8_R(s8_vgf_dpp, 0x200 + i * 4 + j * 0x24 + k * 0x200) = (uint32_t)(int32_t)s8_dpp_vcoef[i][j];
++			}
++		}
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++	S8_R(s8_vgf_dma, 0) |= 1u << 4;                  /* SFR_UPDATE_FORCE */
++	S8_R(s8_vgf_dpp, 0) |= 1u << 4;
++
++	/* DECON: window 5 on channel 1 (VGF0), dw x dh at x0. */
++	sweet_fb_wait_frame_done();
++	S8_R(s8_dpp_decon, 0x218) = (s8_dpp_path1 & ~(7u << 20)) | (1u << 20);
++	S8_R(s8_dpp_decon, S8_WIN5(0x08)) = x0;
++	S8_R(s8_dpp_decon, S8_WIN5(0x0c)) = (dh - 1) << 16 | (x0 + dw - 1);
++	S8_R(s8_dpp_decon, S8_WIN5(0x1c)) = dw * dh;
++	S8_R(s8_dpp_decon, 0x60) |= (1u << 31) | (1u << 5);
++	for (int i = 0; i < 4; i++) {
++		sweet_fb_wait_frame_done();
++	}
++	uint32_t dma_err = S8_R(s8_vgf_dma, 0x870), dpp_err = S8_R(s8_vgf_dpp, 0xd08);
++	IOLog("S8 DPP: after path1 0x%x update 0x%x win5 0x%x 0x%x 0x%x; VGF0 en 0x%x in 0x%x src 0x%x "
++	    "y 0x%x irq 0x%x cfg_err 0x%x; dpp en 0x%x img 0x%x scaled 0x%x h 0x%x v 0x%x irq 0x%x "
++	    "cfg_err 0x%x\n", S8_R(s8_dpp_decon, 0x218), S8_R(s8_dpp_decon, 0x60),
++	    S8_R(s8_dpp_decon, S8_WIN5(0x08)), S8_R(s8_dpp_decon, S8_WIN5(0x0c)),
++	    S8_R(s8_dpp_decon, S8_WIN5(0x1c)), S8_R(s8_vgf_dma, 0), S8_R(s8_vgf_dma, 8),
++	    S8_R(s8_vgf_dma, 0x10), S8_R(s8_vgf_dma, 0x40), S8_R(s8_vgf_dma, 4), dma_err,
++	    S8_R(s8_vgf_dpp, 0), S8_R(s8_vgf_dpp, 0x18), S8_R(s8_vgf_dpp, 0x2c),
++	    S8_R(s8_vgf_dpp, 0x44), S8_R(s8_vgf_dpp, 0x48), S8_R(s8_vgf_dpp, 4), dpp_err);
++	if (dma_err != 0 || dpp_err != 0) {
++		sweet_fb_dpp_restore();
++		IOLog("S8 DPP: configuration error, window 5 back on G0\n");
++		return false;
++	}
++	return true;
++}
++
 +static void
 +sweet_fb_presenter(void *arg __unused, wait_result_t wr __unused)
 +{
@@ -1758,7 +1895,13 @@ index 356ff51..0da8894 100644
 +			continue;
 +		}
 +		sweet_fb_stage = sweet_fb_stages[b];
-+		if (sweet_fb_scaled) {
++		if (sweet_fb_dpp) {
++			sweet_fb_dpp_flip(b);
++			sweet_fb_wait_ticks += t1 - t0;
++			sweet_fb_panel_ticks += mach_absolute_time() - t1;
++			sweet_fb_panel_copies++;
++			continue;
++		} else if (sweet_fb_scaled) {
 +			sweet_fb_scale(sweet_fb_panel, sweet_fb_stride, sweet_fb_stage,
 +			    (uint64_t)sweet_fb_stage_w * 4, sweet_fb_rows);
 +		} else {
@@ -1778,7 +1921,7 @@ index 356ff51..0da8894 100644
  static uint32_t sweet_fb_swaps_logged;
  static uint64_t sweet_fb_swap_count;
  
-@@ -318,7 +607,16 @@ AppleCLCD::swap(const uint8_t *rec)
+@@ -318,7 +750,16 @@ AppleCLCD::swap(const uint8_t *rec)
  	IOLockLock(fLock);
  	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
  	fDirty = true;
@@ -1795,7 +1938,7 @@ index 356ff51..0da8894 100644
  	if ((++sweet_fb_swap_count % 1000) == 0) {
  		IOLog("SWEET FB: %llu swaps\n", sweet_fb_swap_count);
  	}
-@@ -328,6 +626,99 @@ void
+@@ -328,6 +769,117 @@ void
  AppleCLCD::present(const uint8_t *rec)
  {
  	uint32_t mask = get32(rec, 0x104);
@@ -1815,8 +1958,26 @@ index 356ff51..0da8894 100644
 +		sweet_fb_stage_h = sweet_fb_scaled ? fLogicalH : fHeight;
 +		uint64_t stage_bytes = sweet_fb_scaled ? (uint64_t)fLogicalW * 4 * fLogicalH :
 +		    (uint64_t)fRowBytes * fHeight;
-+		uintptr_t stage = (uintptr_t)IOMallocData((vm_size_t)stage_bytes);
-+		uintptr_t stage2 = stage ? (uintptr_t)IOMallocData((vm_size_t)stage_bytes) : 0;
++		int dpp = 0;
++		PE_parse_boot_argn("sweetfb_dpp", &dpp, sizeof(dpp));
++		uintptr_t stage = 0, stage2 = 0;
++		if (dpp != 0 && sweet_fb_scaled && stage_bytes <= 0x01000000) {
++			stage = (uintptr_t)ml_io_map_wcomb(sweet_fb_stage_phys[0], (vm_size_t)stage_bytes);
++			stage2 = stage ? (uintptr_t)ml_io_map_wcomb(sweet_fb_stage_phys[1], (vm_size_t)stage_bytes) : 0;
++			if (stage2 != 0) {
++				bzero((void *)stage, (size_t)stage_bytes);
++				bzero((void *)stage2, (size_t)stage_bytes);
++				uint32_t dw = fLogicalW * fHeight / fLogicalH;
++				sweet_fb_dpp = sweet_fb_dpp_start(fLogicalW, fLogicalH, dw, fHeight, (fWidth - dw) / 2);
++			}
++			if (!sweet_fb_dpp) {
++				stage = stage2 = 0;               /* (WC mappings stay; CPU path below) */
++			}
++		}
++		if (stage == 0) {
++			stage = (uintptr_t)IOMallocData((vm_size_t)stage_bytes);
++			stage2 = stage ? (uintptr_t)IOMallocData((vm_size_t)stage_bytes) : 0;
++		}
 +		sweet_fb_stage_lock = IOLockAlloc();
 +		if (stage2 == 0 || sweet_fb_stage_lock == NULL) {
 +			if (stage != 0) {
@@ -1895,7 +2056,7 @@ index 356ff51..0da8894 100644
  
  
  	if (!fConsolePaused) {
-@@ -380,8 +771,13 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -380,8 +932,13 @@ AppleCLCD::present(const uint8_t *rec)
  			dx = dy = 0;
  		}
  		/* Logical (presented) display coordinates -> panel coordinates. */
@@ -1909,7 +2070,7 @@ index 356ff51..0da8894 100644
  		if (dx < 0) {
  			sx -= dx;
  			w += dx;
-@@ -398,12 +794,21 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -398,12 +955,21 @@ AppleCLCD::present(const uint8_t *rec)
  		if (h > (int32_t)s->height - sy) {
  			h = (int32_t)s->height - sy;
  		}
@@ -1931,7 +2092,7 @@ index 356ff51..0da8894 100644
  		uint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow +
  		    (uint64_t)(sx + w) * 4;
  		if (w <= 0 || h <= 0 || s->elementWidth != 1 || s->elementHeight != 1 ||
-@@ -411,14 +816,49 @@ AppleCLCD::present(const uint8_t *rec)
+@@ -411,14 +977,49 @@ AppleCLCD::present(const uint8_t *rec)
  			src = 0;
  		}
  		if (src != 0 && bpe == 4) {

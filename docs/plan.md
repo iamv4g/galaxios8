@@ -21,7 +21,7 @@ Goal: a Galaxy S8 (Exynos, SM-G950F / SM-G950N) that runs iOS 16 well enough to 
 | Stability | 24 h idle + 2 h use without panic or hang | Not tested |
 | Install | `galaxios8 install` on a Mac: checks the phone, backs up, builds, flashes, verifies; `galaxios8 restore` to undo | Manual steps in `docs/mac-build.md` |
 
-Out of scope, said upfront: GPU acceleration (Mali-G71 cannot run Apple's Metal/AGX stack), cellular, cameras, Face ID/Touch ID and the Secure Enclave, App Store purchases, iCloud. Security is permissive (AMFI, sandbox, AppleKeyStore stand-in): the device must not hold personal data.
+Out of scope, said upfront: Apple's own GPU stack (Mali-G71 cannot run Metal/AGX; a GPU path through CoreAnimation's OpenGL ES backend and Mesa Panfrost is the research direction since 2026-10-23, see [gpu-research.md](gpu-research.md)), cellular, cameras, Face ID/Touch ID and the Secure Enclave, App Store purchases, iCloud. Security is permissive (AMFI, sandbox, AppleKeyStore stand-in): the device must not hold personal data.
 
 ## 2. Work streams
 

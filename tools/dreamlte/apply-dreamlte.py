@@ -1941,8 +1941,9 @@ edit('iokit/Kernel/arm/SweetCPU.cpp', [
 # DPP scaling, step 0: what does S-Boot's display path look like? With
 # s8dpudump=1 the first frame-done wait logs DECON's global, data-path and
 # window registers and, for the six DPU input channels (DT idma_g0..vgf1:
-# DMA 0x12851000 + n * 0x1000, DPP 0x128B1000 + n * 0x1000, common DMA
-# 0x128B0000), the IDMA and DPP enable, format, sizes, base and scaler.
+# reg[0] DPP 0x12851000 + n * 0x1000, reg[1] DMA 0x128B1000 + n * 0x1000,
+# reg[2] common DMA 0x128B0000; dpp_drv.c probe), the IDMA and DPP enable,
+# format, sizes, base and scaler.
 # Offsets: Samsung's regs-decon.h / regs-dpp.h (universal8895 dpu). Off by
 # default: reading a clock-gated channel could stall the bus.
 edit('iokit/Kernel/arm/SweetFramebuffer.cpp', [
@@ -1959,8 +1960,8 @@ edit('iokit/Kernel/arm/SweetFramebuffer.cpp', [
      'sweet_fb_dpu_dump(void)\n'
      '{\n'
      '\tvm_offset_t dec = ml_io_map(0x12860000, 0x2000);\n'
-     '\tvm_offset_t dma = ml_io_map(0x12850000, 0x7000);\n'
-     '\tvm_offset_t dpp = ml_io_map(0x128B0000, 0x7000);\n'
+     '\tvm_offset_t dpp = ml_io_map(0x12850000, 0x7000);\n'
+     '\tvm_offset_t dma = ml_io_map(0x128B0000, 0x7000);\n'
      '\tif (dec == 0 || dma == 0 || dpp == 0) {\n'
      '\t\treturn;\n'
      '\t}\n'
@@ -1973,7 +1974,7 @@ edit('iokit/Kernel/arm/SweetFramebuffer.cpp', [
      '\t\t    S8_R(b, 0x14), S8_R(b, 0x18), S8_R(b, 0x1c));\n'
      '\t}\n'
      '\tIOLog("S8 DPU: dma version 0x%x ch_map 0x%x glb 0x%x\\n",\n'
-     '\t    S8_R(dpp, 0), S8_R(dpp, 4), S8_R(dpp, 0x40));\n'
+     '\t    S8_R(dma, 0), S8_R(dma, 4), S8_R(dma, 0x40));\n'
      '\tfor (uint32_t c = 0; c < 6; c++) {\n'
      '\t\tvm_offset_t i = dma + 0x1000 + c * 0x1000, d = dpp + 0x1000 + c * 0x1000;\n'
      '\t\tIOLog("S8 DPU: ch%u idma en 0x%x in 0x%x out 0x%x src 0x%x off 0x%x img 0x%x y 0x%x"\n'
@@ -2017,4 +2018,202 @@ edit('osfmk/vm/vm_kern.c', [
      '\t\t\tpanic("kmem_range_init: vm_map_locate_space failing for claim %s",\n'
      '\t\t\t    sp.kc_name);\n'
      '#endif\n', 1),
+])
+
+# DPP scaling (sweetfb_dpp=1 with sweetfb_scale=1): the display hardware
+# scales the 1125x2436 frame to 1367x2960 instead of the presenter (9-14 ms
+# of CPU per frame). S-Boot shows its framebuffer on DECON window 5, fed by
+# DMA channel G0 (DECON channel 5; loader screen: DATA_PATH_CONTROL_0 =
+# WIN_EN_F(5), only IDMA 0 running). Scaling exists only on the VGF
+# channels (Samsung sets SCALED_IMG_SIZE only for VGF0/1), so window 5 moves
+# to VGF0 (DECON channel 1, helper.c dpu_dma_type_to_channel): DMA
+# 0x128B5000, DPP 0x12855000 (DT idma_vgf0 reg[1], reg[0]). Register use
+# follows Samsung's dpp_reg.c (dpp_reg_init, dpp_reg_configure_params:
+# XRGB8888, sizes, ratio = src << 20 / dst, 8-tap H / 4-tap V coefficient
+# table 0 for upscaling, phases 0..8 as dpp_reg_set_h/v_coef write them) and
+# decon_reg.c (decon_reg_set_window_control, decon_reg_config_win_channel).
+# The DPU SYSMMUs are off (loader), so the DMA reads physical addresses: the
+# two stage buffers live in low DRAM XNU never uses (0xd0000000 and
+# 0xd1000000, System RAM under Linux, away from the 0xcc000000 framebuffer),
+# mapped write-combined. Each present points VGF0 at the stage just written,
+# right after a DECON frame-done, and forces the DMA SFR update (forcing at
+# a random time gave artifacts in an earlier test). If the DMA or DPP
+# reports a configuration error after the switch, window 5 goes back to G0
+# and the CPU path is used. Built, not tested on the phone.
+S8_DPP = r'''
+extern "C" vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
+static bool sweet_fb_dpp;
+static vm_offset_t s8_vgf_dma, s8_vgf_dpp, s8_dpp_decon;
+static uint64_t sweet_fb_stage_phys[2] = { 0xd0000000ULL, 0xd1000000ULL };
+static uint32_t s8_dpp_win_start, s8_dpp_win_end, s8_dpp_win_count, s8_dpp_path1;
+
+/* dpp_coef.h table 0 ("Ratio <= 65536"), phases 0..8 */
+static const int16_t s8_dpp_hcoef[9][8] = {
+	{  0,  0,   0, 128,   0,   0,  0,  0 },
+	{ -1,  2,  -6, 127,   7,  -2,  1,  0 },
+	{ -1,  4, -12, 125,  16,  -5,  1,  0 },
+	{ -1,  5, -15, 120,  25,  -8,  2,  0 },
+	{ -1,  6, -18, 114,  35, -10,  3, -1 },
+	{ -1,  6, -20, 107,  46, -13,  4, -1 },
+	{ -2,  7, -21,  99,  57, -16,  5, -1 },
+	{ -1,  6, -20,  89,  68, -18,  5, -1 },
+	{ -1,  6, -20,  79,  79, -20,  6, -1 },
+};
+static const int16_t s8_dpp_vcoef[9][4] = {
+	{  0, 128,   0,  0 },
+	{ -4, 127,   5,  0 },
+	{ -6, 124,  11, -1 },
+	{ -8, 118,  19, -1 },
+	{ -8, 111,  27, -2 },
+	{ -8, 102,  37, -3 },
+	{ -8,  92,  48, -4 },
+	{ -7,  81,  59, -5 },
+	{ -6,  70,  70, -6 },
+};
+
+#define S8_WIN5(off) (0x1000 + 5 * 0x30 + (off))
+
+static void
+sweet_fb_dpp_flip(int b)
+{
+	uint32_t pa = (uint32_t)sweet_fb_stage_phys[b];
+	S8_R(s8_vgf_dma, 0x40) = pa;                     /* IN_BASE_ADDR_Y */
+	S8_R(s8_vgf_dma, 0x44) = pa;                     /* IN_BASE_ADDR_C */
+	__asm__ volatile ("dsb sy" ::: "memory");
+	S8_R(s8_vgf_dma, 0) |= 1u << 4;                  /* SFR_UPDATE_FORCE */
+}
+
+static void
+sweet_fb_dpp_restore(void)
+{
+	S8_R(s8_dpp_decon, 0x218) = s8_dpp_path1;
+	S8_R(s8_dpp_decon, S8_WIN5(0x08)) = s8_dpp_win_start;
+	S8_R(s8_dpp_decon, S8_WIN5(0x0c)) = s8_dpp_win_end;
+	S8_R(s8_dpp_decon, S8_WIN5(0x1c)) = s8_dpp_win_count;
+	S8_R(s8_dpp_decon, 0x60) |= (1u << 31) | (1u << 5);
+}
+
+/* Window 5 from G0 (1:1 panel copy) to VGF0 scaling sw x sh to dw x dh at x0. */
+static bool
+sweet_fb_dpp_start(uint32_t sw, uint32_t sh, uint32_t dw, uint32_t dh, uint32_t x0)
+{
+	s8_vgf_dma = ml_io_map(0x128B5000, 0x1000);
+	s8_vgf_dpp = ml_io_map(0x12855000, 0x1000);
+	s8_dpp_decon = ml_io_map(0x12860000, 0x2000);
+	vm_offset_t g0 = ml_io_map(0x128B1000, 0x1000);
+	if (s8_vgf_dma == 0 || s8_vgf_dpp == 0 || s8_dpp_decon == 0 || g0 == 0) {
+		return false;
+	}
+	s8_dpp_path1 = S8_R(s8_dpp_decon, 0x218);
+	s8_dpp_win_start = S8_R(s8_dpp_decon, S8_WIN5(0x08));
+	s8_dpp_win_end = S8_R(s8_dpp_decon, S8_WIN5(0x0c));
+	s8_dpp_win_count = S8_R(s8_dpp_decon, S8_WIN5(0x1c));
+	IOLog("S8 DPP: before path0 0x%x path1 0x%x win5 0x%x 0x%x 0x%x 0x%x; G0 en 0x%x in 0x%x "
+	    "y 0x%x; VGF0 en 0x%x dpp en 0x%x\n", S8_R(s8_dpp_decon, 0x214), s8_dpp_path1,
+	    S8_R(s8_dpp_decon, S8_WIN5(0)), s8_dpp_win_start, s8_dpp_win_end, s8_dpp_win_count,
+	    S8_R(g0, 0), S8_R(g0, 8), S8_R(g0, 0x40), S8_R(s8_vgf_dma, 0), S8_R(s8_vgf_dpp, 0));
+
+	/* DMA: as G0 (bus, QoS, deadlock, gating, recovery), then format and size. */
+	for (uint32_t off = 0x34; off <= 0x38; off += 4) {
+		S8_R(s8_vgf_dma, off) = S8_R(g0, off);
+	}
+	for (uint32_t off = 0x50; off <= 0x5c; off += 4) {
+		S8_R(s8_vgf_dma, off) = S8_R(g0, off);
+	}
+	S8_R(s8_vgf_dma, 0) |= 3u << 9;                  /* SFR, SRAM clock gate enable */
+	S8_R(s8_vgf_dma, 0x0c) = 0xffu << 24;            /* OUT_CON: frame alpha */
+	S8_R(s8_vgf_dma, 0x08) = (S8_R(g0, 0x08) & ~((0x1fu << 11) | (3u << 8) | (1u << 7) |
+	    (1u << 6) | (1u << 4) | (1u << 3))) | (4u << 11);   /* XRGB8888 */
+	S8_R(s8_vgf_dma, 0x10) = sh << 16 | sw;          /* SRC_SIZE */
+	S8_R(s8_vgf_dma, 0x14) = 0;                      /* SRC_OFFSET */
+	S8_R(s8_vgf_dma, 0x18) = sh << 16 | sw;          /* IMG_SIZE */
+	S8_R(s8_vgf_dma, 0x40) = (uint32_t)sweet_fb_stage_phys[0];
+	S8_R(s8_vgf_dma, 0x44) = (uint32_t)sweet_fb_stage_phys[0];
+
+	/* DPP: RGB, per-frame alpha, sizes, ratios, coefficients. */
+	S8_R(s8_vgf_dpp, 0) |= 7u << 8;                  /* clock gate enable */
+	S8_R(s8_vgf_dpp, 0x08) &= ~((7u << 16) | (1u << 11) | (1u << 10));
+	S8_R(s8_vgf_dpp, 0x18) = sh << 16 | sw;          /* IMG_SIZE */
+	S8_R(s8_vgf_dpp, 0x2c) = dh << 16 | dw;          /* SCALED_IMG_SIZE */
+	S8_R(s8_vgf_dpp, 0x44) = (uint32_t)(((uint64_t)sw << 20) / dw);
+	S8_R(s8_vgf_dpp, 0x48) = (uint32_t)(((uint64_t)sh << 20) / dh);
+	for (uint32_t i = 0; i < 9; i++) {
+		for (uint32_t k = 0; k < 2; k++) {
+			for (uint32_t j = 0; j < 8; j++) {
+				S8_R(s8_vgf_dpp, 0x290 + i * 4 + j * 0x24 + k * 0x200) = (uint32_t)(int32_t)s8_dpp_hcoef[i][j];
+			}
+			for (uint32_t j = 0; j < 4; j++) {
+				S8_R(s8_vgf_dpp, 0x200 + i * 4 + j * 0x24 + k * 0x200) = (uint32_t)(int32_t)s8_dpp_vcoef[i][j];
+			}
+		}
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+	S8_R(s8_vgf_dma, 0) |= 1u << 4;                  /* SFR_UPDATE_FORCE */
+	S8_R(s8_vgf_dpp, 0) |= 1u << 4;
+
+	/* DECON: window 5 on channel 1 (VGF0), dw x dh at x0. */
+	sweet_fb_wait_frame_done();
+	S8_R(s8_dpp_decon, 0x218) = (s8_dpp_path1 & ~(7u << 20)) | (1u << 20);
+	S8_R(s8_dpp_decon, S8_WIN5(0x08)) = x0;
+	S8_R(s8_dpp_decon, S8_WIN5(0x0c)) = (dh - 1) << 16 | (x0 + dw - 1);
+	S8_R(s8_dpp_decon, S8_WIN5(0x1c)) = dw * dh;
+	S8_R(s8_dpp_decon, 0x60) |= (1u << 31) | (1u << 5);
+	for (int i = 0; i < 4; i++) {
+		sweet_fb_wait_frame_done();
+	}
+	uint32_t dma_err = S8_R(s8_vgf_dma, 0x870), dpp_err = S8_R(s8_vgf_dpp, 0xd08);
+	IOLog("S8 DPP: after path1 0x%x update 0x%x win5 0x%x 0x%x 0x%x; VGF0 en 0x%x in 0x%x src 0x%x "
+	    "y 0x%x irq 0x%x cfg_err 0x%x; dpp en 0x%x img 0x%x scaled 0x%x h 0x%x v 0x%x irq 0x%x "
+	    "cfg_err 0x%x\n", S8_R(s8_dpp_decon, 0x218), S8_R(s8_dpp_decon, 0x60),
+	    S8_R(s8_dpp_decon, S8_WIN5(0x08)), S8_R(s8_dpp_decon, S8_WIN5(0x0c)),
+	    S8_R(s8_dpp_decon, S8_WIN5(0x1c)), S8_R(s8_vgf_dma, 0), S8_R(s8_vgf_dma, 8),
+	    S8_R(s8_vgf_dma, 0x10), S8_R(s8_vgf_dma, 0x40), S8_R(s8_vgf_dma, 4), dma_err,
+	    S8_R(s8_vgf_dpp, 0), S8_R(s8_vgf_dpp, 0x18), S8_R(s8_vgf_dpp, 0x2c),
+	    S8_R(s8_vgf_dpp, 0x44), S8_R(s8_vgf_dpp, 0x48), S8_R(s8_vgf_dpp, 4), dpp_err);
+	if (dma_err != 0 || dpp_err != 0) {
+		sweet_fb_dpp_restore();
+		IOLog("S8 DPP: configuration error, window 5 back on G0\n");
+		return false;
+	}
+	return true;
+}
+'''
+edit('iokit/Kernel/arm/SweetFramebuffer.cpp', [
+    ('static uint64_t sweet_fb_panel_ticks, sweet_fb_panel_copies;\n',
+     'static uint64_t sweet_fb_panel_ticks, sweet_fb_panel_copies;\n' + S8_DPP, 1),
+    # presenter: in DPP mode the flip replaces the scale, and the shown stage
+    # stays busy until the next one is shown
+    ('\t\tsweet_fb_stage = sweet_fb_stages[b];\n'
+     '\t\tif (sweet_fb_scaled) {\n',
+     '\t\tsweet_fb_stage = sweet_fb_stages[b];\n'
+     '\t\tif (sweet_fb_dpp) {\n'
+     '\t\t\tsweet_fb_dpp_flip(b);\n'
+     '\t\t\tsweet_fb_wait_ticks += t1 - t0;\n'
+     '\t\t\tsweet_fb_panel_ticks += mach_absolute_time() - t1;\n'
+     '\t\t\tsweet_fb_panel_copies++;\n'
+     '\t\t\tcontinue;\n'
+     '\t\t} else if (sweet_fb_scaled) {\n', 1),
+    # stage buffers: low DRAM, write-combined, when the DPP takes over
+    ('\t\tuintptr_t stage = (uintptr_t)IOMallocData((vm_size_t)stage_bytes);\n'
+     '\t\tuintptr_t stage2 = stage ? (uintptr_t)IOMallocData((vm_size_t)stage_bytes) : 0;\n',
+     '\t\tint dpp = 0;\n'
+     '\t\tPE_parse_boot_argn("sweetfb_dpp", &dpp, sizeof(dpp));\n'
+     '\t\tuintptr_t stage = 0, stage2 = 0;\n'
+     '\t\tif (dpp != 0 && sweet_fb_scaled && stage_bytes <= 0x01000000) {\n'
+     '\t\t\tstage = (uintptr_t)ml_io_map_wcomb(sweet_fb_stage_phys[0], (vm_size_t)stage_bytes);\n'
+     '\t\t\tstage2 = stage ? (uintptr_t)ml_io_map_wcomb(sweet_fb_stage_phys[1], (vm_size_t)stage_bytes) : 0;\n'
+     '\t\t\tif (stage2 != 0) {\n'
+     '\t\t\t\tbzero((void *)stage, (size_t)stage_bytes);\n'
+     '\t\t\t\tbzero((void *)stage2, (size_t)stage_bytes);\n'
+     '\t\t\t\tuint32_t dw = fLogicalW * fHeight / fLogicalH;\n'
+     '\t\t\t\tsweet_fb_dpp = sweet_fb_dpp_start(fLogicalW, fLogicalH, dw, fHeight, (fWidth - dw) / 2);\n'
+     '\t\t\t}\n'
+     '\t\t\tif (!sweet_fb_dpp) {\n'
+     '\t\t\t\tstage = stage2 = 0;               /* (WC mappings stay; CPU path below) */\n'
+     '\t\t\t}\n'
+     '\t\t}\n'
+     '\t\tif (stage == 0) {\n'
+     '\t\t\tstage = (uintptr_t)IOMallocData((vm_size_t)stage_bytes);\n'
+     '\t\t\tstage2 = stage ? (uintptr_t)IOMallocData((vm_size_t)stage_bytes) : 0;\n'
+     '\t\t}\n', 1),
 ])

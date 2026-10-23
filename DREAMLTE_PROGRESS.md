@@ -548,6 +548,30 @@ launchd logs, because the loader's pmsg copy is overwritten by the kernel):
   only IDMA 0 (G0) enabled (en 0x4, src 0xb9005a0 = 1440x2960, base
   0xcc000000); IDMA 1-5 off, so the scaling channels are free.
 
+### DPP scaling and GPU direction (2026-10-23)
+
+- The user chose: finish DPP and RAM, then research the GPU.
+- DPU layout (Samsung universal8895 `dpu/`): per channel DT `reg[0]` = DPP
+  (0x12851000 + n * 0x1000), `reg[1]` = DMA (0x128B1000 + n * 0x1000),
+  `reg[2]` = common DMA 0x128B0000; n = G0, G1, VG0, VG1, VGF0, VGF1. DECON
+  channel numbers differ (helper.c): G0 = 5, G1 = 3, VG0 = 0, VG1 = 4,
+  VGF0 = 1, VGF1 = 2. S-Boot's framebuffer: window 5 on G0. Only VGF0/1
+  scale.
+- Built, not tested: `sweetfb_dpp=1` (with `sweetfb_scale=1`) moves window 5
+  to VGF0, scales 1125x2436 to 1367x2960 in hardware and flips the VGF0 base
+  between two stage buffers at 0xd0000000 / 0xd1000000 (low DRAM, mapped
+  write-combined) after each frame-done; falls back to the CPU path on a
+  DMA/DPP config error. `s8dpudump=1` logs DECON/DMA/DPP registers. Test
+  image `s8-c15-boot.img` (512 MiB, both on, `s8autoreset=240`): the log
+  says whether the switch took; whether the picture is right needs eyes.
+- GPU: `docs/gpu-research.md` (research agent; facts / reported / estimates
+  labelled). Primary path: HackiOS's design (github.com/oosexgang, MIT;
+  CoreAnimation through its OpenGL ES backend, an injected `EAGLContext`
+  bridge to Mesa) with Mesa Panfrost for Mali-G71 and a small Mali driver in
+  XNU (G71 needs no firmware; DT `mali@13900000`, IRQs 92/93/91, `pd_g3d`
+  0x164840e0, ACPM DVFS id 0x0B040004). First milestone: "the Mali does one
+  job" (power on, read GPU_ID, run one write-value job).
+
 ## Open work
 
 1. Boot the latest kernel/loader: does the frame-done copy remove the tearing,
