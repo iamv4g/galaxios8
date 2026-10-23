@@ -914,6 +914,22 @@ iOS app or CoreAnimation using it (OSMesa renders off-screen).
   checks; 121984 submits all done; 13 power-ups; no fault apart from T4.
   Slowest frame 1.24 s (again once per run; open).
 
+### IOSurfaces for the GPU (c42, 2026-10-24)
+
+S8Mali selector 8 ImportSurface [IOSurface ID] -> [handle, GPU VA, size]:
+the surface's own pages (SweetSurface: wired kernel buffer, not contiguous;
+or a low-DRAM stage surface) mapped 4 KiB at a time into the GPU VA, the
+surface retained, its descriptor used for user mappings. Selector 9 SyncBO:
+`flush_dcache64` (clean + invalidate) over the BO's physical pages that are
+XNU RAM (`pmap_valid_address`), since the CPU maps surfaces cached and the
+GPU is not coherent. `tools/dreamlte/s8surftest.c`: IOSurfaceCreate 256x256
+BGRA (ID 2, 1024 bytes/row), CPU fill 0x11111111, import (GPU VA 0x2000000,
+0x40000 bytes), SyncBO, 256 chained WRITE_VALUE jobs writing the diagonal,
+SyncBO, read through IOSurfaceGetBaseAddress. **c42: status 1, 256/256
+diagonal words, 256/256 other probes still the CPU's fill: passed.** Same
+boot: self-test (T1-T5) and s8gltest (incl. 90 s soak, 57664 frames, 0 wrong)
+passed again.
+
 ## Open work
 
 1. Boot the latest kernel/loader: does the frame-done copy remove the tearing,

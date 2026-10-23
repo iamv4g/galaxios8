@@ -876,10 +876,10 @@ index 7a32a23..4e20b25 100644
  	*usecs = nsecs / NSEC_PER_USEC;
 diff --git a/iokit/Kernel/arm/S8Mali.cpp b/iokit/Kernel/arm/S8Mali.cpp
 new file mode 100644
-index 0000000..ac23fa6
+index 0000000..d910a85
 --- /dev/null
 +++ b/iokit/Kernel/arm/S8Mali.cpp
-@@ -0,0 +1,1039 @@
+@@ -0,0 +1,1162 @@
 +/*
 + * S8Mali: kernel driver for the Galaxy S8's Mali-G71 MP20 (Exynos 8895,
 + * DT mali@13900000, GPU_ID 0x60a00001 = r0p0), written for this port.
@@ -915,6 +915,11 @@ index 0000000..ac23fa6
 + *   5 GetBOOffset [handle] -> [gpu va]
 + *   6 Madvise [handle, madv] -> [retained]
 + *   7 Report [code, a, b]                  (logged as "S8 MALI: <proc> report")
++ *   8 ImportSurface [IOSurface ID] -> [handle, gpu va, size]
++ *                                          (the surface's own pages, mapped for the GPU)
++ *   9 SyncBO [handle]                      (clean + invalidate the CPU caches over the BO:
++ *                                          before the GPU reads CPU writes to a cached
++ *                                          mapping, and after it wrote, before the CPU reads)
 + * clientMemoryForType(handle) returns the BO's memory for
 + * IOConnectMapMemory64 (pass kIOMapAnywhere | kIOMapWriteCombineCache).
 + */
@@ -930,6 +935,10 @@ index 0000000..ac23fa6
 +#include <pexpert/pexpert.h>
 +#include <kern/clock.h>
 +#include <sys/proc.h>
++#include "SweetSurface.h"
++
++extern "C" void flush_dcache64(addr64_t addr, unsigned count, int phys);
++extern "C" boolean_t pmap_valid_address(uint64_t addr);
 +
 +extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 +extern "C" kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
@@ -1047,6 +1056,7 @@ index 0000000..ac23fa6
 +	uint32_t flags;
 +	/* one descriptor per BO: IOConnectUnmapMemory finds the mapping through it (c38) */
 +	IOMemoryDescriptor *md;
++	OSObject *owner;        /* imported IOSurface (its pages, not the pool's), or NULL */
 +};
 +
 +class S8MaliUserClient;
@@ -1091,6 +1101,8 @@ index 0000000..ac23fa6
 +	void unmapRange(uint64_t va, uint64_t size);
 +
 +	s8_bo *boCreate(uint64_t size, uint32_t flags);
++	s8_bo *boImportSurface(uint32_t id);
++	void boSync(s8_bo *bo);
 +	void boFree(s8_bo *bo);
 +	void *boKernel(s8_bo *bo) { return (void *)(fBOs + (bo->pa - BO_PHYS)); }
 +
@@ -1475,10 +1487,95 @@ index 0000000..ac23fa6
 +	return bo;
 +}
 +
++/*
++ * An IOSurface's memory as a BO, without copying: its physical pages are mapped into the GPU
++ * VA one 4 KiB page at a time (SweetSurface buffers are wired kernel memory, not contiguous;
++ * the low-DRAM stage surfaces are contiguous). The CPU maps these pages cached, the GPU is
++ * not coherent: callers use SyncBO around GPU use.
++ */
++s8_bo *
++S8Mali::boImportSurface(uint32_t id)
++{
++	SweetSurface *surf = sweet_surface_copy(id);
++	if (surf == NULL) {
++		return NULL;
++	}
++	IOMemoryDescriptor *md = surf->memory;
++	uint64_t size = md != NULL ? (md->getLength() + 0xfff) & ~0xfffULL : 0;
++	uint64_t vsize = (size + VA_UNIT - 1) & ~(VA_UNIT - 1);
++	int64_t vunit = size != 0 ? bm_find(fVAMap, VA_UNITS, vsize / VA_UNIT, 1) : -1;
++	s8_bo *bo = vunit >= 0 ? (s8_bo *)IOMallocZero(sizeof(*bo)) : NULL;
++	if (bo == NULL || md->prepare() != kIOReturnSuccess) {
++		if (bo != NULL) {
++			IOFree(bo, sizeof(*bo));
++		}
++		surf->release();
++		return NULL;
++	}
++	bo->va = VA_BASE + (uint64_t)vunit * VA_UNIT;
++	bo->vsize = vsize;
++	bo->backed = size;
++	bo->flags = BO_NOEXEC;
++	bo->owner = surf;
++	md->retain();
++	bo->md = md;
++	bool ok = true;
++	for (uint64_t off = 0; ok && off < size;) {
++		IOByteCount len = 0;
++		addr64_t pa = md->getPhysicalSegment(off, &len, kIOMemoryMapperNone);
++		len = len > size - off ? size - off : len;
++		ok = pa != 0 && (pa & 0xfff) == 0 && len >= 0x1000 &&
++		    mapRange(bo->va + off, pa, len & ~0xfffULL, true);
++		off += len & ~0xfffULL;
++	}
++	if (!ok) {
++		unmapRange(bo->va, size);
++		md->complete();
++		md->release();
++		surf->release();
++		IOFree(bo, sizeof(*bo));
++		return NULL;
++	}
++	bm_set(fVAMap, (uint64_t)vunit, vsize / VA_UNIT, true);
++	return bo;
++}
++
++void
++S8Mali::boSync(s8_bo *bo)
++{
++	for (uint64_t off = 0; off < bo->backed;) {
++		IOByteCount len = 0;
++		addr64_t pa = bo->owner != NULL ? bo->md->getPhysicalSegment(off, &len, kIOMemoryMapperNone) :
++		    bo->pa + off;
++		if (bo->owner == NULL) {
++			len = (IOByteCount)(bo->backed - off);
++		}
++		if (pa == 0 || len == 0) {
++			break;
++		}
++		len = len > bo->backed - off ? (IOByteCount)(bo->backed - off) : len;
++		/* XNU RAM only: pool BOs and the low-DRAM stage surfaces are mapped
++		 * write-combined (no cache lines), and outside the physical aperture */
++		if (pmap_valid_address(pa)) {
++			flush_dcache64(pa, (unsigned)len, TRUE);
++		}
++		off += len;
++	}
++	s8_dsb();
++}
++
 +void
 +S8Mali::boFree(s8_bo *bo)
 +{
 +	unmapRange(bo->va, bo->backed);
++	if (bo->owner != NULL) {
++		bm_set(fVAMap, (bo->va - VA_BASE) / VA_UNIT, bo->vsize / VA_UNIT, false);
++		bo->md->complete();
++		OSSafeReleaseNULL(bo->md);
++		OSSafeReleaseNULL(bo->owner);
++		IOFree(bo, sizeof(*bo));
++		return;
++	}
 +	bm_set(fPageMap, (bo->pa - BO_PHYS) / BO_UNIT, bo->backed / BO_UNIT, false);
 +	bm_set(fVAMap, (bo->va - VA_BASE) / VA_UNIT, bo->vsize / VA_UNIT, false);
 +	OSSafeReleaseNULL(bo->md);
@@ -1841,8 +1938,8 @@ index 0000000..ac23fa6
 +S8MaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
 +    IOExternalMethodDispatch *dispatch __unused, OSObject *target __unused, void *reference __unused)
 +{
-+	static const uint8_t ins[] = { 1, 2, 1, 2, 2, 1, 2, 3 };
-+	static const uint8_t outs[] = { 1, 2, 0, 1, 0, 1, 1, 0 };
++	static const uint8_t ins[] = { 1, 2, 1, 2, 2, 1, 2, 3, 1, 1 };
++	static const uint8_t outs[] = { 1, 2, 0, 1, 0, 1, 1, 0, 3, 0 };
 +	if (selector >= sizeof(ins) || args->scalarInputCount != ins[selector] ||
 +	    args->scalarOutputCount != outs[selector]) {
 +		return kIOReturnBadArgument;
@@ -1907,6 +2004,32 @@ index 0000000..ac23fa6
 +		ret = lookup(in[0]) != NULL ? kIOReturnSuccess : kIOReturnBadArgument;
 +		out[0] = 1;
 +		break;
++	case 8: {                                       /* ImportSurface */
++		uint32_t h = 0;
++		while (h < MAX_HANDLES && fHandles[h] != NULL) {
++			h++;
++		}
++		s8_bo *bo = h < MAX_HANDLES && in[0] <= 0xffffffffULL ? fGPU->boImportSurface((uint32_t)in[0]) : NULL;
++		if (bo == NULL) {
++			ret = kIOReturnBadArgument;
++			break;
++		}
++		fHandles[h] = bo;
++		fBOs++;
++		out[0] = h + 1;
++		out[1] = bo->va;
++		out[2] = bo->backed;
++		break;
++	}
++	case 9: {                                       /* SyncBO */
++		s8_bo *bo = lookup(in[0]);
++		if (bo == NULL) {
++			ret = kIOReturnBadArgument;
++		} else {
++			fGPU->boSync(bo);
++		}
++		break;
++	}
 +	case 7: {                                       /* Report */
 +		char name[32];
 +		proc_selfname(name, sizeof(name));
