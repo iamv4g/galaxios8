@@ -9,7 +9,10 @@
   place of mmap() on a DRM file descriptor.
 - OSMesa: its screen is Panfrost's when the kernel has the S8Mali service and the environment
   does not say OSMESA_SOFTWARE=1; otherwise softpipe, as before.
-- HackiOS's osmesa-es-profile.patch (MIT) is applied separately by mk-mesa.sh.
+- IOSurfaces as GL images: glEGLImageTargetTexture2DOES(target, (GLeglImageOES)surfaceID)
+  makes the surface's memory a texture (and, attached to an FBO, a render target), as
+  HackiOS's freedreno-darwin.patch (MIT) does for freedreno. The surface comes in where Linux
+  passes a dma-buf fd: s8drm's drmPrimeFDToHandle imports it (S8Mali selector 8).
 Every replacement asserts its match count, as tools/dreamlte/apply-dreamlte.py does.
 """
 import sys
@@ -38,7 +41,7 @@ edit('meson.build', [(
     "  # libdrm stand-in (src/s8drm, from galaxios8 tools/dreamlte/mesa/s8drm).\n"
     "  dep_libdrm = declare_dependency(\n"
     "    include_directories : include_directories('src/s8drm'),\n"
-    "    link_args : ['-framework', 'IOKit', '-framework', 'CoreFoundation'],\n"
+    "    link_args : ['-framework', 'IOKit', '-framework', 'IOSurface', '-framework', 'CoreFoundation'],\n"
     "  )\n"
     "elif dep_libdrm.found()\n", 1)])
 
@@ -121,4 +124,81 @@ edit('src/gallium/targets/osmesa/osmesa_target.c', [
      '   if (screen)\n'
      '      return screen;\n'
      '#endif\n\n', 1),
+])
+
+edit('src/panfrost/lib/kmod/pan_kmod.c', [(
+    "      size_t size = lseek(fd, 0, SEEK_END);\n",
+    "#ifdef __APPLE__\n"
+    "      size_t size = s8_drm_import_size(handle);     /* fd: an IOSurface ID */\n"
+    "#else\n"
+    "      size_t size = lseek(fd, 0, SEEK_END);\n"
+    "#endif\n", 1)])
+
+edit('src/gallium/frontends/osmesa/osmesa.c', [
+    ("extern struct pipe_screen *\nosmesa_create_screen(void);\n",
+     "extern struct pipe_screen *\nosmesa_create_screen(void);\n\n"
+     "extern struct pipe_resource *\nosmesa_surface_resource(struct pipe_screen *screen, uint32_t surface);\n", 1),
+    ("static void\ncreate_st_manager(void)\n",
+     "/* No EGL here: the image of glEGLImageTargetTexture2DOES is an IOSurface ID. */\n"
+     "static bool\n"
+     "osmesa_st_get_egl_image(struct pipe_frontend_screen *fscreen, void *image,\n"
+     "                        struct st_egl_image *out)\n"
+     "{\n"
+     "   memset(out, 0, sizeof(*out));\n"
+     "   out->texture = osmesa_surface_resource(fscreen->screen, (uint32_t)(uintptr_t)image);\n"
+     "   if (!out->texture)\n"
+     "      return false;\n"
+     "   out->format = out->texture->format;\n"
+     "   return true;\n"
+     "}\n\n"
+     "static bool\n"
+     "osmesa_st_validate_egl_image(struct pipe_frontend_screen *fscreen, void *image)\n"
+     "{\n"
+     "   return image != NULL;\n"
+     "}\n\n"
+     "static void\ncreate_st_manager(void)\n", 1),
+    ("      global_fscreen->get_egl_image = NULL;\n",
+     "      global_fscreen->get_egl_image = osmesa_st_get_egl_image;\n"
+     "      global_fscreen->validate_egl_image = osmesa_st_validate_egl_image;\n", 1),
+])
+
+edit('src/gallium/targets/osmesa/osmesa_target.c', [(
+    "struct pipe_screen *\nosmesa_create_screen(void);\n",
+    "struct pipe_resource *\nosmesa_surface_resource(struct pipe_screen *screen, uint32_t surface);\n\n"
+    "/*\n"
+    " * An IOSurface's memory as a texture (sampler view and render target): one plane of 32-bit\n"
+    " * BGRA, linear, imported by the kernel driver. NULL: not the GPU's screen, or another format.\n"
+    " */\n"
+    "struct pipe_resource *\n"
+    "osmesa_surface_resource(struct pipe_screen *screen, uint32_t surface)\n"
+    "{\n"
+    "#if defined(GALLIUM_PANFROST) && defined(__APPLE__)\n"
+    "   struct s8_drm_surface s;\n"
+    "   if (s8_drm_surface_info(surface, &s) != 0 || s.pixel_format != 0x42475241 /* 'BGRA' */)\n"
+    "      return NULL;\n"
+    "   struct pipe_resource templ = {\n"
+    "      .target = PIPE_TEXTURE_2D,\n"
+    "      .format = PIPE_FORMAT_B8G8R8A8_UNORM,\n"
+    "      .width0 = s.width,\n"
+    "      .height0 = s.height,\n"
+    "      .depth0 = 1,\n"
+    "      .array_size = 1,\n"
+    "      .bind = PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_RENDER_TARGET,\n"
+    "   };\n"
+    "   struct winsys_handle handle = {\n"
+    "      .type = WINSYS_HANDLE_TYPE_FD,\n"
+    "      .handle = surface,\n"
+    "      .stride = s.bytes_per_row,\n"
+    "      .offset = 0,\n"
+    "      .size = s.size,\n"
+    "      .modifier = DRM_FORMAT_MOD_LINEAR,\n"
+    "   };\n"
+    "   return screen->resource_from_handle(screen, &templ, &handle, 0);\n"
+    "#else\n"
+    "   return NULL;\n"
+    "#endif\n"
+    "}\n\n"
+    "struct pipe_screen *\nosmesa_create_screen(void);\n", 1),
+    ('#include "util/xmlconfig.h"\n',
+     '#include "util/xmlconfig.h"\n#include "frontend/winsys_handle.h"\n#include "pipe/p_screen.h"\n#include "pipe/p_state.h"\n#include "drm-uapi/drm_fourcc.h"\n', 1),
 ])

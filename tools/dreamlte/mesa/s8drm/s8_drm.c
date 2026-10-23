@@ -5,6 +5,10 @@
  *   2 FreeBO [handle]                  3 Submit [jc, requirements] -> [JS status, 1 = done]
  *   4 WaitBO [handle]                  5 GetBOOffset [handle] -> [gpu va]
  *   6 Madvise [handle, madv] -> [retained]    7 Report [code, a, b]
+ *   8 ImportSurface [IOSurface ID] -> [handle, gpu va, size]   9 SyncBO [handle]
+ * IOSurfaces come in where Linux passes dma-buf fds (drmPrimeFDToHandle: the "fd" is the
+ * surface ID). The CPU maps surfaces cached and the GPU is not coherent, so every submit that
+ * names an imported BO cleans and invalidates its cache lines before and after the job.
  * A buffer's memory is the client memory of the type that is its handle. The device "file" is
  * /dev/null: one GPU, one connection per process.
  */
@@ -16,6 +20,7 @@
 #include <sys/mman.h>
 #include <mach/mach.h>
 #include <CoreFoundation/CoreFoundation.h>
+#include <IOSurface/IOSurfaceRef.h>
 
 #include "xf86drm.h"
 #include "drm-uapi/panfrost_drm.h"
@@ -40,7 +45,10 @@ extern kern_return_t IOConnectUnmapMemory64(io_connect_t connect, uint32_t memor
 #define kIOReturnNoMemory       0xe00002bd
 #define kIOReturnBadArgument    0xe00002c2
 
-enum { SEL_PARAM, SEL_CREATE, SEL_FREE, SEL_SUBMIT, SEL_WAIT, SEL_OFFSET, SEL_MADVISE, SEL_REPORT };
+enum { SEL_PARAM, SEL_CREATE, SEL_FREE, SEL_SUBMIT, SEL_WAIT, SEL_OFFSET, SEL_MADVISE, SEL_REPORT,
+       SEL_IMPORT, SEL_SYNC };
+
+static int call(uint32_t sel, const uint64_t *in, uint32_t nin, uint64_t *out, uint32_t nout);
 
 static io_connect_t conn;
 static int conn_fd = -1;
@@ -51,6 +59,44 @@ static uint64_t submits, failed;
 /* CPU mappings, to unmap by address. */
 #define MAX_MAPS 8192
 static struct { uintptr_t addr; uint32_t handle; } maps[MAX_MAPS];
+
+/* Imported BOs (kernel handles are 1..4096): their size, 0 if not imported. */
+#define MAX_HANDLES 4096
+static uint64_t imported[MAX_HANDLES + 1];
+
+static void
+sync_imported(const struct drm_panfrost_submit *s)
+{
+	const uint32_t *h = (const uint32_t *)(uintptr_t)s->bo_handles;
+	for (uint32_t i = 0; h != NULL && i < s->bo_handle_count; i++) {
+		if (h[i] <= MAX_HANDLES && imported[h[i]] != 0) {
+			uint64_t in = h[i];
+			call(SEL_SYNC, &in, 1, NULL, 0);
+		}
+	}
+}
+
+int
+s8_drm_surface_info(uint32_t surface, struct s8_drm_surface *out)
+{
+	IOSurfaceRef s = IOSurfaceLookup(surface);
+	if (s == NULL) {
+		return -1;
+	}
+	out->width = (uint32_t)IOSurfaceGetWidth(s);
+	out->height = (uint32_t)IOSurfaceGetHeight(s);
+	out->bytes_per_row = (uint32_t)IOSurfaceGetBytesPerRow(s);
+	out->pixel_format = IOSurfaceGetPixelFormat(s);
+	out->size = IOSurfaceGetAllocSize(s);
+	CFRelease(s);
+	return 0;
+}
+
+size_t
+s8_drm_import_size(uint32_t handle)
+{
+	return handle <= MAX_HANDLES ? (size_t)imported[handle] : 0;
+}
 
 static int
 call(uint32_t sel, const uint64_t *in, uint32_t nin, uint64_t *out, uint32_t nout)
@@ -146,9 +192,11 @@ drmIoctl(int fd, unsigned long request, void *arg)
 	case DRM_IOCTL_PANFROST_SUBMIT: {
 		struct drm_panfrost_submit *s = arg;
 		uint64_t in[2] = { s->jc, s->requirements }, status = 0;
+		sync_imported(s);                       /* CPU writes out to memory */
 		if (call(SEL_SUBMIT, in, 2, &status, 1) != 0) {
 			return -1;
 		}
+		sync_imported(s);                       /* no stale lines over the GPU's writes */
 		submits++;
 		if (status != 1) {
 			/* as on Linux, a job fault is not an ioctl error; logged in the kernel */
@@ -257,6 +305,9 @@ int
 drmCloseBufferHandle(int fd, uint32_t handle)
 {
 	(void)fd;
+	if (handle <= MAX_HANDLES) {
+		imported[handle] = 0;
+	}
 	uint64_t in = handle;
 	return call(SEL_FREE, &in, 1, NULL, 0);
 }
@@ -272,9 +323,14 @@ drmPrimeHandleToFD(int fd, uint32_t handle, uint32_t flags, int *prime_fd)
 int
 drmPrimeFDToHandle(int fd, int prime_fd, uint32_t *handle)
 {
-	(void)fd; (void)prime_fd; (void)handle;
-	errno = ENOSYS;
-	return -ENOSYS;
+	(void)fd;
+	uint64_t in = (uint32_t)prime_fd, out[3];
+	if (call(SEL_IMPORT, &in, 1, out, 3) != 0 || out[0] > MAX_HANDLES) {
+		return -errno;
+	}
+	*handle = (uint32_t)out[0];
+	imported[out[0]] = out[2];
+	return 0;
 }
 
 int

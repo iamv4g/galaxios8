@@ -929,6 +929,17 @@ SyncBO, read through IOSurfaceGetBaseAddress. **c42: status 1, 256/256
 diagonal words, 256/256 other probes still the CPU's fill: passed.** Same
 boot: self-test (T1-T5) and s8gltest (incl. 90 s soak, 57664 frames, 0 wrong)
 passed again.
+- Mesa: IOSurfaces as GL images (patch-mesa.py, s8drm): the surface ID goes
+  where Linux passes a dma-buf fd (drmPrimeFDToHandle -> ImportSurface; the
+  size from the import instead of lseek); OSMesa's get_egl_image makes
+  `glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, (void *)surfaceID)` a
+  linear BGRA texture/render target (as HackiOS's freedreno patch); every
+  submit naming an imported BO runs SyncBO before and after the job.
+  `tools/dreamlte/s8glsurf.c`. **c43 (c42 kernel, drop g8): GL renders into a
+  1125x2436 IOSurface (bpr 4544): FBO complete, centre green, corner red,
+  7/7 probes read through IOSurfaceGetBaseAddress; 120 frames of clear + 64
+  triangles + glFinish: 9.4 ms per frame** (most of it the two 11 MB cache
+  flushes per submit; a write-combined surface would avoid them).
 
 ## Open work
 

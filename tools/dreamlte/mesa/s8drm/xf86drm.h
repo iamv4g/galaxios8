@@ -60,4 +60,12 @@ void *s8_drm_mmap(int fd, uint64_t offset, size_t size); /* offset from DRM_IOCT
 int s8_drm_munmap(void *address, size_t size);
 void s8_drm_report(uint64_t code, uint64_t a, uint64_t b); /* to the kernel log */
 
+/* IOSurfaces, imported where Linux imports a dma-buf (the "fd" is the surface ID). */
+struct s8_drm_surface {
+	uint32_t width, height, bytes_per_row, pixel_format;
+	uint64_t size;
+};
+int s8_drm_surface_info(uint32_t surface, struct s8_drm_surface *out);
+size_t s8_drm_import_size(uint32_t handle);   /* bytes of an imported BO */
+
 #endif
