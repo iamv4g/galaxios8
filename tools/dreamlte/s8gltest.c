@@ -12,6 +12,7 @@
  *    8  FBO frames (render target texture 1125x2436, clear + 64 triangles + glFinish, no copy
  *       to the caller): count, microseconds per frame
  *    9  soak, 90 s of FBO frames: frames, max microseconds of one frame
+ *   13  soak: index of the slowest frame, microseconds of the second slowest
  *   10  soak: wrong probe pixels (glReadPixels of one pixel every 50 frames), checks
  *   12  idle power-down: 5 times (400 ms pause, then one checked FBO frame): good frames,
  *       wrong pixels
@@ -236,6 +237,7 @@ main(void)
 	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
 	uint64_t fbo_frames = 0, fbo_us = 0, soak = 0, soak_max = 0, soak_bad = 0, soak_checks = 0;
+	uint64_t soak_max_at = 0, soak_second = 0;
 	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
 		mach_timebase_info_data_t tb;
 		mach_timebase_info(&tb);
@@ -279,7 +281,13 @@ main(void)
 				glFinish();
 			}
 			uint64_t dt = (mach_absolute_time() - ts) * tb.numer / tb.denom / 1000;
-			soak_max = dt > soak_max ? dt : soak_max;
+			if (dt > soak_max) {
+				soak_second = soak_max;
+				soak_max = dt;
+				soak_max_at = f;
+			} else if (dt > soak_second) {
+				soak_second = dt;
+			}
 		}
 	}
 	/* the driver powers the cores off after 200 ms idle; each frame must bring them back */
@@ -300,6 +308,7 @@ main(void)
 	ok = ok && idle_good == 5;
 	report(8, fbo_frames, fbo_us);
 	report(9, soak, soak_max);
+	report(13, soak_max_at, soak_second);
 	report(10, soak_bad, soak_checks);
 	ok = ok && fbo_frames == 300 && soak_bad == 0;
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);

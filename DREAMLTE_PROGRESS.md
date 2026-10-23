@@ -978,7 +978,10 @@ passed again.
    frame wrote.
 3. Driver: per-process GPU address spaces (all clients share AS 0 now),
    job IRQs instead of polling, tiler-heap grow on fault (HEAP BOs back
-   32 MiB), the 1.2 s slowest frame seen once per soak.
+   32 MiB). Slow frames: c45 recorded the slowest soak frame: #9552 (2.05 s),
+   second 1.31 s; no GPU timeout or reset (a hung job would log one at 2 s),
+   so the stall is on the CPU side; during the soak (alongside boot) the TMU
+   reached 84 C and the guard lowered big/LITTLE to 1469/1456 MHz.
 
 ## Open work
 
