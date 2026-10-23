@@ -518,6 +518,21 @@ launchd logs, because the loader's pmsg copy is overwritten by the kernel):
   script needs to handle the display already being on (c11/c12) before its
   frame rate means anything again.
 
+### RAM (2026-10-23)
+
+- iOS gets 512 MiB of 4 GiB (ADT dram-size, since the first S8 boots: 2 GiB
+  then panicked in `kmem_range_init`). The S8's RAM is three ranges
+  (`80000000-bc7fffff`, `c0000000-ffffffff`, `880000000-8ffffffff`); XNU
+  takes one contiguous range, so the most without kernel changes is the
+  whole high bank, 2 GiB. Using all of it needs multi-range DRAM in pmap.
+- `tools/mkadt_dreamlte.py --dram-mib` / `S8_DRAM_MIB=` for `make-boot.sh`.
+  At 2 GiB the loader's UFS probe DMA area (0x8f0000000) lies inside XNU's
+  RAM, so the loader zeroes it again after the probe.
+- **c13** (2 GiB, daily args + clocks, `s8autoreset=300`): not back in TWRP
+  after 20 min, phone gone from USB. Hung without the panic reset. BOOT
+  holds c13: a person must force TWRP (Vol Down + Power to reset, then
+  Vol Up + Bixby + Power), then pull the pmsg log to see where it stopped.
+
 ## Open work
 
 1. Boot the latest kernel/loader: does the frame-done copy remove the tearing,

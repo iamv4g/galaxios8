@@ -23,7 +23,10 @@ import mkadt
 DRAM_BASE = 0x880000000
 # 512 MiB, the A5XELTE-proven size: with the whole 2 GiB bank the first S8
 # boot panicked in kmem_range_init (kernel VA claims in the 39-bit 4K layout).
+# --dram-mib tries more; the bank ends at 0x900000000 (2048 MiB). XNU takes
+# one contiguous range, so the two low banks (0x80000000, 0xc0000000) stay out.
 DRAM_SIZE = 0x20000000
+DRAM_BANK_MIB = 2048
 FB_PHYS, FB_W, FB_H = 0xcc000000, 1440, 2960
 TIMEBASE = 26000000
 
@@ -69,7 +72,7 @@ def cpu_node(logical):
     ]
 
 
-def build(canvas=(FB_W, FB_H)):
+def build(canvas=(FB_W, FB_H), dram_size=DRAM_SIZE):
     root = mkadt.build(seed=os.urandom(64), qemu=True)
     # The kernel's SweetPlatformExpert personality matches 'samsung,a5xelte'
     # (KernelConfigTables.cpp); without it IOKit panics "Unable to find driver
@@ -79,7 +82,7 @@ def build(canvas=(FB_W, FB_H)):
              mkadt.cstr('AppleARM'))
     chosen = child(root, 'chosen')
     set_prop(chosen, 'dram-base', mkadt.u64(DRAM_BASE))
-    set_prop(chosen, 'dram-size', mkadt.u64(DRAM_SIZE))
+    set_prop(chosen, 'dram-size', mkadt.u64(dram_size))
     set_prop(chosen, 'firmware-version', mkadt.cstr('dreamlte-entry'))
     set_prop(chosen, 'system-firmware-version', mkadt.cstr('dreamlte-entry'))
     cpus = child(root, 'cpus')
@@ -136,7 +139,12 @@ if __name__ == '__main__':
     parser.add_argument('output', type=Path)
     parser.add_argument('--canvas', default=f'{FB_W}x{FB_H}',
                         help='display size presented to iOS, WxH')
+    parser.add_argument('--dram-mib', type=int, default=DRAM_SIZE >> 20,
+                        help=f'RAM given to XNU from {DRAM_BASE:#x}, at most {DRAM_BANK_MIB}')
     args = parser.parse_args()
-    blob = adt.serialize(build(tuple(int(v) for v in args.canvas.split('x'))))
+    if not 0 < args.dram_mib <= DRAM_BANK_MIB:
+        parser.error(f'--dram-mib must be 1..{DRAM_BANK_MIB}')
+    blob = adt.serialize(build(tuple(int(v) for v in args.canvas.split('x')),
+                               args.dram_mib << 20))
     args.output.write_bytes(blob)
     print(f'{args.output}: {len(blob)} bytes')

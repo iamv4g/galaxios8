@@ -21,7 +21,8 @@
 #include "pmic.h"
 #include "display_probe.h"
 
-#define UFS_PROBE_DMA		0x8f0000000UL	/* high bank, outside XNU's window */
+#define UFS_PROBE_DMA		0x8f0000000UL	/* high bank; inside XNU's RAM at 2 GiB */
+#define UFS_PROBE_DMA_SIZE	0x14000UL	/* ufs_probe.c D_SIZE */
 
 /* ---- board facts (s8-probe v2-v7, live DT, /proc/iomem) ---- */
 #define FB_BASE			0xcc000000UL	/* s3cfb.bootloaderfb */
@@ -596,6 +597,12 @@ uint64_t dl_main(uintptr_t dtb, uint64_t el, uint64_t sctlr)
 	}
 	out("\n");
 	ufs_probe(kv, out, UFS_PROBE_DMA);
+	/* With 2 GiB for XNU (S8_DRAM_MIB) the probe's DMA area lies inside
+	 * XNU's RAM, which was zeroed above; zero it again. */
+	if (UFS_PROBE_DMA >= p->phys_base && UFS_PROBE_DMA + UFS_PROBE_DMA_SIZE <= mem_end) {
+		zero(UFS_PROBE_DMA, UFS_PROBE_DMA_SIZE);
+		clean(UFS_PROBE_DMA, UFS_PROBE_DMA + UFS_PROBE_DMA_SIZE);
+	}
 	rtc_bootarg(ba, pmic_init(kv, out));
 	/* s8lit=<kHz>: A53 clock (S-Boot leaves 1053 MHz; levels in pmic.c). */
 	acpm_cpu_clocks(cmdline_u32(p->cmdline, "s8lit"), acpm_word);
