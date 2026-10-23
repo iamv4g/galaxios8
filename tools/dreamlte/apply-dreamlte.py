@@ -2055,7 +2055,7 @@ static vm_offset_t s8_vgf_dma, s8_vgf_dpp, s8_dpp_decon;
  * the TrustZone secure_camera carve-out, and took an SError. The DMA base
  * registers are 32-bit, so XNU's RAM (0x880000000) is out of reach. */
 static uint64_t sweet_fb_stage_phys[2] = { 0xd2000000ULL, 0xd3000000ULL };
-static uint32_t s8_dpp_win_start, s8_dpp_win_end, s8_dpp_win_count, s8_dpp_path1;
+static uint32_t s8_dpp_path1;
 
 /* dpp_coef.h table 0 ("Ratio <= 65536"), phases 0..8 */
 static const int16_t s8_dpp_hcoef[9][8] = {
@@ -2081,7 +2081,17 @@ static const int16_t s8_dpp_vcoef[9][4] = {
 	{ -6,  70,  70, -6 },
 };
 
-#define S8_WIN5(off) (0x1000 + 5 * 0x30 + (off))
+/*
+ * c18: window 5's channel map did not change (DATA_PATH_CONTROL_1 read back
+ * 0x500000; regs-decon.h: "WIN5_CHMAP_F [22:20]=5: dedicated to channel5"),
+ * so VGF0 gets window 0 and window 5 (G0) is switched off. VGF0's
+ * IDMA_CFG_ERR_STATE read 0x10 (IMG_HEIGHT_ROTATION) while no window used
+ * it; whether the DMA really fetches is judged by its frame-done IRQ status
+ * after the switch (IDMA_IRQ bit 16; 17 deadlock, 19 read slave error, 21
+ * config error).
+ */
+#define S8_WIN(w, off) (0x1000 + (w) * 0x30 + (off))
+static uint32_t s8_dpp_win0[8], s8_dpp_path0;
 
 static void
 sweet_fb_dpp_flip(int b)
@@ -2096,14 +2106,15 @@ sweet_fb_dpp_flip(int b)
 static void
 sweet_fb_dpp_restore(void)
 {
+	for (uint32_t k = 0; k < 8; k++) {
+		S8_R(s8_dpp_decon, S8_WIN(0, 4 * k)) = s8_dpp_win0[k];
+	}
 	S8_R(s8_dpp_decon, 0x218) = s8_dpp_path1;
-	S8_R(s8_dpp_decon, S8_WIN5(0x08)) = s8_dpp_win_start;
-	S8_R(s8_dpp_decon, S8_WIN5(0x0c)) = s8_dpp_win_end;
-	S8_R(s8_dpp_decon, S8_WIN5(0x1c)) = s8_dpp_win_count;
-	S8_R(s8_dpp_decon, 0x60) |= (1u << 31) | (1u << 5);
+	S8_R(s8_dpp_decon, 0x214) = s8_dpp_path0;
+	S8_R(s8_dpp_decon, 0x60) |= (1u << 31) | (1u << 5) | 1u;
 }
 
-/* Window 5 from G0 (1:1 panel copy) to VGF0 scaling sw x sh to dw x dh at x0. */
+/* Window 0 on VGF0 scaling sw x sh to dw x dh at x0; window 5 (G0) off. */
 static bool
 sweet_fb_dpp_start(uint32_t sw, uint32_t sh, uint32_t dw, uint32_t dh, uint32_t x0)
 {
@@ -2114,13 +2125,15 @@ sweet_fb_dpp_start(uint32_t sw, uint32_t sh, uint32_t dw, uint32_t dh, uint32_t 
 	if (s8_vgf_dma == 0 || s8_vgf_dpp == 0 || s8_dpp_decon == 0 || g0 == 0) {
 		return false;
 	}
+	s8_dpp_path0 = S8_R(s8_dpp_decon, 0x214);
 	s8_dpp_path1 = S8_R(s8_dpp_decon, 0x218);
-	s8_dpp_win_start = S8_R(s8_dpp_decon, S8_WIN5(0x08));
-	s8_dpp_win_end = S8_R(s8_dpp_decon, S8_WIN5(0x0c));
-	s8_dpp_win_count = S8_R(s8_dpp_decon, S8_WIN5(0x1c));
+	for (uint32_t k = 0; k < 8; k++) {
+		s8_dpp_win0[k] = S8_R(s8_dpp_decon, S8_WIN(0, 4 * k));
+	}
 	IOLog("S8 DPP: before path0 0x%x path1 0x%x win5 0x%x 0x%x 0x%x 0x%x; G0 en 0x%x in 0x%x "
-	    "y 0x%x; VGF0 en 0x%x dpp en 0x%x\n", S8_R(s8_dpp_decon, 0x214), s8_dpp_path1,
-	    S8_R(s8_dpp_decon, S8_WIN5(0)), s8_dpp_win_start, s8_dpp_win_end, s8_dpp_win_count,
+	    "y 0x%x; VGF0 en 0x%x dpp en 0x%x\n", s8_dpp_path0, s8_dpp_path1,
+	    S8_R(s8_dpp_decon, S8_WIN(5, 0)), S8_R(s8_dpp_decon, S8_WIN(5, 0x08)),
+	    S8_R(s8_dpp_decon, S8_WIN(5, 0x0c)), S8_R(s8_dpp_decon, S8_WIN(5, 0x1c)),
 	    S8_R(g0, 0), S8_R(g0, 8), S8_R(g0, 0x40), S8_R(s8_vgf_dma, 0), S8_R(s8_vgf_dpp, 0));
 
 	/* DMA: as G0 (bus, QoS, deadlock, gating, recovery), then format and size. */
@@ -2160,29 +2173,40 @@ sweet_fb_dpp_start(uint32_t sw, uint32_t sh, uint32_t dw, uint32_t dh, uint32_t 
 	__asm__ volatile ("dsb sy" ::: "memory");
 	S8_R(s8_vgf_dma, 0) |= 1u << 4;                  /* SFR_UPDATE_FORCE */
 	S8_R(s8_vgf_dpp, 0) |= 1u << 4;
+	uint32_t err_pre = S8_R(s8_vgf_dma, 0x870);
 
-	/* DECON: window 5 on channel 1 (VGF0), dw x dh at x0. */
+	/* DECON: window 0 = window 5's blending, our position, channel 1. */
 	sweet_fb_wait_frame_done();
-	S8_R(s8_dpp_decon, 0x218) = (s8_dpp_path1 & ~(7u << 20)) | (1u << 20);
-	S8_R(s8_dpp_decon, S8_WIN5(0x08)) = x0;
-	S8_R(s8_dpp_decon, S8_WIN5(0x0c)) = (dh - 1) << 16 | (x0 + dw - 1);
-	S8_R(s8_dpp_decon, S8_WIN5(0x1c)) = dw * dh;
-	S8_R(s8_dpp_decon, 0x60) |= (1u << 31) | (1u << 5);
+	S8_R(s8_vgf_dma, 4) = (0xfbu << 16) | (S8_R(s8_vgf_dma, 4) & 0xffffu);  /* clear IRQ status */
+	S8_R(s8_vgf_dpp, 4) = (0x21u << 16) | (S8_R(s8_vgf_dpp, 4) & 0xffffu);
+	S8_R(s8_dpp_decon, S8_WIN(0, 0x00)) = S8_R(s8_dpp_decon, S8_WIN(5, 0x00));
+	S8_R(s8_dpp_decon, S8_WIN(0, 0x04)) = S8_R(s8_dpp_decon, S8_WIN(5, 0x04));
+	S8_R(s8_dpp_decon, S8_WIN(0, 0x08)) = x0;
+	S8_R(s8_dpp_decon, S8_WIN(0, 0x0c)) = (dh - 1) << 16 | (x0 + dw - 1);
+	S8_R(s8_dpp_decon, S8_WIN(0, 0x18)) = S8_R(s8_dpp_decon, S8_WIN(5, 0x18));
+	S8_R(s8_dpp_decon, S8_WIN(0, 0x1c)) = dw * dh;
+	S8_R(s8_dpp_decon, 0x218) = (s8_dpp_path1 & ~7u) | 1u;
+	S8_R(s8_dpp_decon, 0x214) = (s8_dpp_path0 & ~(3u << 20) & ~3u) | 1u;   /* win0 on, win5 off */
+	S8_R(s8_dpp_decon, 0x60) |= (1u << 31) | (1u << 5) | 1u;
 	for (int i = 0; i < 4; i++) {
 		sweet_fb_wait_frame_done();
 	}
+	uint32_t dma_irq = S8_R(s8_vgf_dma, 4), dpp_irq = S8_R(s8_vgf_dpp, 4);
 	uint32_t dma_err = S8_R(s8_vgf_dma, 0x870), dpp_err = S8_R(s8_vgf_dpp, 0xd08);
-	IOLog("S8 DPP: after path1 0x%x update 0x%x win5 0x%x 0x%x 0x%x; VGF0 en 0x%x in 0x%x src 0x%x "
-	    "y 0x%x irq 0x%x cfg_err 0x%x; dpp en 0x%x img 0x%x scaled 0x%x h 0x%x v 0x%x irq 0x%x "
-	    "cfg_err 0x%x\n", S8_R(s8_dpp_decon, 0x218), S8_R(s8_dpp_decon, 0x60),
-	    S8_R(s8_dpp_decon, S8_WIN5(0x08)), S8_R(s8_dpp_decon, S8_WIN5(0x0c)),
-	    S8_R(s8_dpp_decon, S8_WIN5(0x1c)), S8_R(s8_vgf_dma, 0), S8_R(s8_vgf_dma, 8),
-	    S8_R(s8_vgf_dma, 0x10), S8_R(s8_vgf_dma, 0x40), S8_R(s8_vgf_dma, 4), dma_err,
+	IOLog("S8 DPP: after path0 0x%x path1 0x%x update 0x%x win0 0x%x 0x%x 0x%x 0x%x; VGF0 en 0x%x "
+	    "in 0x%x src 0x%x y 0x%x irq 0x%x cfg_err 0x%x (before switch 0x%x); dpp en 0x%x img 0x%x "
+	    "scaled 0x%x h 0x%x v 0x%x irq 0x%x cfg_err 0x%x\n", S8_R(s8_dpp_decon, 0x214),
+	    S8_R(s8_dpp_decon, 0x218), S8_R(s8_dpp_decon, 0x60), S8_R(s8_dpp_decon, S8_WIN(0, 0)),
+	    S8_R(s8_dpp_decon, S8_WIN(0, 0x08)), S8_R(s8_dpp_decon, S8_WIN(0, 0x0c)),
+	    S8_R(s8_dpp_decon, S8_WIN(0, 0x1c)), S8_R(s8_vgf_dma, 0), S8_R(s8_vgf_dma, 8),
+	    S8_R(s8_vgf_dma, 0x10), S8_R(s8_vgf_dma, 0x40), dma_irq, dma_err, err_pre,
 	    S8_R(s8_vgf_dpp, 0), S8_R(s8_vgf_dpp, 0x18), S8_R(s8_vgf_dpp, 0x2c),
-	    S8_R(s8_vgf_dpp, 0x44), S8_R(s8_vgf_dpp, 0x48), S8_R(s8_vgf_dpp, 4), dpp_err);
-	if (dma_err != 0 || dpp_err != 0) {
+	    S8_R(s8_vgf_dpp, 0x44), S8_R(s8_vgf_dpp, 0x48), dpp_irq, dpp_err);
+	bool fetching = (dma_irq & (1u << 16)) != 0;
+	bool faults = (dma_irq & ((1u << 17) | (1u << 19) | (1u << 21))) != 0 || (dpp_irq & (1u << 21)) != 0;
+	if (!fetching || faults) {
 		sweet_fb_dpp_restore();
-		IOLog("S8 DPP: configuration error, window 5 back on G0\n");
+		IOLog("S8 DPP: VGF0 %s, window 5 back on G0\n", faults ? "reports a fault" : "never finished a frame");
 		return false;
 	}
 	return true;
@@ -2310,4 +2334,52 @@ edit('iokit/Kernel/arm/SweetCPU.cpp', [
      '\t\t    kernel_thread_start(s8_wdt_thread, NULL, &t) == KERN_SUCCESS) {\n'
      '\t\t\tthread_deallocate(t);\n'
      '\t\t}\n', 1),
+])
+
+# Panic backtraces: the panic log buffer is not set up on the S8 ("gPanicBase
+# is still not initialized"), so no backtrace reaches the console. Before the
+# panic reset, walk the frame-pointer chain and write the return addresses
+# to the klog (c21's 2 GiB "write_pte_fast: PTE write is unaligned" came from
+# pmap_enter_pte with no caller known).
+edit('pexpert/arm/pe_serial.c', [
+    ('static int\ns8_halt_restart(unsigned int type)\n{\n',
+     'static void klog_putc(uint8_t c);\n'
+     '\n'
+     'static void\n'
+     's8_klog_hex(uint64_t v)\n'
+     '{\n'
+     '\tklog_putc(\' \');\n'
+     '\tklog_putc(\'0\');\n'
+     '\tklog_putc(\'x\');\n'
+     '\tfor (int s = 60; s >= 0; s -= 4) {\n'
+     '\t\tklog_putc((uint8_t)"0123456789abcdef"[(v >> s) & 0xf]);\n'
+     '\t}\n'
+     '}\n'
+     '\n'
+     'static void\n'
+     's8_backtrace(void)\n'
+     '{\n'
+     '\tstatic int done;\n'
+     '\tif (done++) {\n'
+     '\t\treturn;\n'
+     '\t}\n'
+     '\tconst char *t = "\\nS8 BT:";\n'
+     '\tfor (; *t; t++) {\n'
+     '\t\tklog_putc((uint8_t)*t);\n'
+     '\t}\n'
+     '\tuint64_t *fp = (uint64_t *)__builtin_frame_address(0);\n'
+     '\tfor (int i = 0; i < 32 && fp != NULL && ((uint64_t)fp & 0xf) == 0 &&\n'
+     '\t    (uint64_t)fp >= 0xfffffff000000000ULL; i++) {\n'
+     '\t\ts8_klog_hex(fp[1]);\n'
+     '\t\tfp = (uint64_t *)fp[0];\n'
+     '\t}\n'
+     '\tklog_putc(\'\\n\');\n'
+     '}\n'
+     '\n'
+     'static int\ns8_halt_restart(unsigned int type)\n{\n', 1),
+    ('\tuint32_t reason = (s8_restart_to_recovery || (type != 1 && s8_panic_to_recovery)) ?\n',
+     '\tif (type != 1) {\n'
+     '\t\ts8_backtrace();\n'
+     '\t}\n'
+     '\tuint32_t reason = (s8_restart_to_recovery || (type != 1 && s8_panic_to_recovery)) ?\n', 1),
 ])

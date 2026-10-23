@@ -622,6 +622,32 @@ launchd logs, because the loader's pmsg copy is overwritten by the kernel):
   healthy boot alive), `s8-c19-boot.img` (2 GiB), `s8-c18-boot.img` (DPP);
   all with s8autoreset=240 s8wdt=80.
 
+### Results 2026-10-23 night (unattended chain after one manual TWRP entry)
+
+- Photo of c17's screen: 2 GiB got past kmem_range_init with the compressor
+  fix ("S8 KMEM ... largest free 0xb73dfc000 static claims 0x6a51bc000",
+  compressor 2048M) and through IOKit/AMFI start, then panicked
+  `write_pte_fast: PTE write is unaligned, ptep=...3850, pte=0x4200000830bcec3`
+  (pmap.c:623: 16K VM pages on 4K hardware pages, ptep must be 32-byte
+  aligned).
+- wdt-test (512 MiB, s8wdt=80): watchdog armed (WTCON 0xff39, WTDAT 63440),
+  kicker logged, ran the full 4 min, clean autoreset. The kicker works; a
+  real watchdog reset (TWRP or upload mode?) is still untested.
+- c19 (2 GiB): **booted fully** (442 execs, DVFS max 76 C), clean autoreset.
+- c21 (2 GiB, same kernel family): the same write_pte_fast panic right after
+  "A5XELTE AMFI: built-in interface registered" (ptep 0xfffffff00aacfc38,
+  pte 0x4200008838c8ec3), and **this time it reset into TWRP by itself after
+  37 s** (early-panic reset works). Caller 0xfffffff0074008e8 =
+  pmap_enter_pte: a pmap_enter at a VA 0x3000 past a 16K boundary.
+  Intermittent (c19 passed), so something random; 0124 now walks the frame
+  chain in s8_halt_restart and logs "S8 BT:" return addresses (c22).
+- c18 (DPP, window 5): window 5's channel map is fixed (read back 0x500000).
+  **c20 (DPP, window 0 on VGF0, window 5 off): DECON took it (path0 0x1,
+  path1 0x500001), VGF0 reports frame done (IRQ 0x101f6, bit 16) with no
+  fault bits;** no fallback. Whether the picture is right is not yet seen.
+  VGF0's IDMA_CFG_ERR_STATE reads 0x10 (IMG_HEIGHT_ROTATION) before and
+  after; it does not stop the fetch.
+
 ## Open work
 
 1. Boot the latest kernel/loader: does the frame-done copy remove the tearing,
