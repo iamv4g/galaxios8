@@ -1937,3 +1937,84 @@ edit('iokit/Kernel/arm/SweetCPU.cpp', [
      '\t}\n'
      '#endif\n', 1),
 ])
+
+# DPP scaling, step 0: what does S-Boot's display path look like? With
+# s8dpudump=1 the first frame-done wait logs DECON's global, data-path and
+# window registers and, for the six DPU input channels (DT idma_g0..vgf1:
+# DMA 0x12851000 + n * 0x1000, DPP 0x128B1000 + n * 0x1000, common DMA
+# 0x128B0000), the IDMA and DPP enable, format, sizes, base and scaler.
+# Offsets: Samsung's regs-decon.h / regs-dpp.h (universal8895 dpu). Off by
+# default: reading a clock-gated channel could stall the bus.
+edit('iokit/Kernel/arm/SweetFramebuffer.cpp', [
+    ('\t\t*(volatile uint32_t *)(sweet_fb_decon + 0x40) |= (1u << 13) | 1u;\n\t}\n',
+     '\t\t*(volatile uint32_t *)(sweet_fb_decon + 0x40) |= (1u << 13) | 1u;\n'
+     '\t\tuint32_t dump = 0;\n'
+     '\t\tif (PE_parse_boot_argn("s8dpudump", &dump, sizeof(dump)) && dump) {\n'
+     '\t\t\tsweet_fb_dpu_dump();\n'
+     '\t\t}\n'
+     '\t}\n', 1),
+    ('static void\nsweet_fb_wait_frame_done(void)\n{\n',
+     '#define S8_R(b, o) (*(volatile uint32_t *)((b) + (o)))\n'
+     'static void\n'
+     'sweet_fb_dpu_dump(void)\n'
+     '{\n'
+     '\tvm_offset_t dec = ml_io_map(0x12860000, 0x2000);\n'
+     '\tvm_offset_t dma = ml_io_map(0x12850000, 0x7000);\n'
+     '\tvm_offset_t dpp = ml_io_map(0x128B0000, 0x7000);\n'
+     '\tif (dec == 0 || dma == 0 || dpp == 0) {\n'
+     '\t\treturn;\n'
+     '\t}\n'
+     '\tIOLog("S8 DPU: decon global 0x%x update 0x%x path0 0x%x path1 0x%x path2 0x%x\\n",\n'
+     '\t    S8_R(dec, 0), S8_R(dec, 0x60), S8_R(dec, 0x214), S8_R(dec, 0x218), S8_R(dec, 0x230));\n'
+     '\tfor (uint32_t w = 0; w < 6; w++) {\n'
+     '\t\tvm_offset_t b = dec + 0x1000 + w * 0x30;\n'
+     '\t\tIOLog("S8 DPU: win%u 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x\\n", w,\n'
+     '\t\t    S8_R(b, 0), S8_R(b, 4), S8_R(b, 8), S8_R(b, 0xc), S8_R(b, 0x10),\n'
+     '\t\t    S8_R(b, 0x14), S8_R(b, 0x18), S8_R(b, 0x1c));\n'
+     '\t}\n'
+     '\tIOLog("S8 DPU: dma version 0x%x ch_map 0x%x glb 0x%x\\n",\n'
+     '\t    S8_R(dpp, 0), S8_R(dpp, 4), S8_R(dpp, 0x40));\n'
+     '\tfor (uint32_t c = 0; c < 6; c++) {\n'
+     '\t\tvm_offset_t i = dma + 0x1000 + c * 0x1000, d = dpp + 0x1000 + c * 0x1000;\n'
+     '\t\tIOLog("S8 DPU: ch%u idma en 0x%x in 0x%x out 0x%x src 0x%x off 0x%x img 0x%x y 0x%x"\n'
+     '\t\t    " | dpp en 0x%x in 0x%x img 0x%x scaled 0x%x h 0x%x v 0x%x\\n", c,\n'
+     '\t\t    S8_R(i, 0), S8_R(i, 8), S8_R(i, 0xc), S8_R(i, 0x10), S8_R(i, 0x14),\n'
+     '\t\t    S8_R(i, 0x18), S8_R(i, 0x40), S8_R(d, 0), S8_R(d, 8), S8_R(d, 0x18),\n'
+     '\t\t    S8_R(d, 0x2c), S8_R(d, 0x44), S8_R(d, 0x48));\n'
+     '\t}\n'
+     '}\n'
+     '\n'
+     'static void\nsweet_fb_wait_frame_done(void)\n{\n', 1),
+])
+
+# RAM above 512 MiB: with 2 GiB (c13, and the first S8 boot) kmem_range_init
+# panicked "vm_map_locate_space failing for claim kmem_ptr_range_meta". The
+# pointer/data/sprayqtn claims are sized to fill the largest free kernel_map
+# hole exactly and then placed one after another from the fuzzed start, so
+# any VA lost to placement makes the last claim miss. Keep 1 GiB of the
+# hole out of the sizing (the data range is tens of GiB) and print the
+# numbers, so a repeat failure on screen says why.
+edit('osfmk/vm/vm_kern.c', [
+    ('\tassert((total_claims & PAGE_MASK) == 0);\n'
+     '\tlargest_free_size -= total_claims;\n',
+     '\tassert((total_claims & PAGE_MASK) == 0);\n'
+     '#if defined(DREAMLTE)\n'
+     '\tprintf("S8 KMEM: map 0x%llx-0x%llx largest free 0x%llx static claims 0x%llx (%u)\\n",\n'
+     '\t    (unsigned long long)kernel_map->min_offset, (unsigned long long)kernel_map->max_offset,\n'
+     '\t    (unsigned long long)largest_free_size, (unsigned long long)total_claims, kmem_claim_count);\n'
+     '\tif (largest_free_size > total_claims + (2ULL << 30)) {\n'
+     '\t\tlargest_free_size -= 1ULL << 30;\n'
+     '\t}\n'
+     '#endif\n'
+     '\tlargest_free_size -= total_claims;\n', 1),
+    ('\t\t\tpanic("kmem_range_init: vm_map_locate_space failing for claim %s",\n'
+     '\t\t\t    sp.kc_name);\n',
+     '#if defined(DREAMLTE)\n'
+     '\t\t\tpanic("kmem_range_init: vm_map_locate_space failing for claim %s "\n'
+     '\t\t\t    "size 0x%llx start 0x%llx (%u of %u)", sp.kc_name,\n'
+     '\t\t\t    (unsigned long long)sp.kc_size, (unsigned long long)start, i, kmem_claim_count);\n'
+     '#else\n'
+     '\t\t\tpanic("kmem_range_init: vm_map_locate_space failing for claim %s",\n'
+     '\t\t\t    sp.kc_name);\n'
+     '#endif\n', 1),
+])

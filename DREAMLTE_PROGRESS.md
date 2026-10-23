@@ -532,6 +532,21 @@ launchd logs, because the loader's pmsg copy is overwritten by the kernel):
   after 20 min, phone gone from USB. Hung without the panic reset. BOOT
   holds c13: a person must force TWRP (Vol Down + Power to reset, then
   Vol Up + Bixby + Power), then pull the pmsg log to see where it stopped.
+- The user's photo of the screen: c13 panicked like the first 2 GiB boot,
+  `kmem_range_init: vm_map_locate_space failing for claim
+  kmem_ptr_range_meta` (vm_kern.c:3645), right after vm_page_bootstrap
+  (127915 pages). Too early for the s8autoreset hook (set up with the klog
+  after ml_io_map works), so the phone stays on the panic screen; the
+  charging screen also boots BOOT, so only the key combo gets out.
+- Fix built, not tested: 0124 keeps 1 GiB of the largest kernel_map hole out
+  of kmem's pointer/data/sprayqtn sizing (they were sized to fill it exactly)
+  and prints "S8 KMEM: map ... largest free ... static claims ..." plus the
+  failing claim's size and start in the panic. Image `s8-c14-boot.img`
+  (2 GiB, `s8autoreset=240`) is ready; test it only with someone at the
+  phone.
+- A family member's video (loader screen): DECON 0x0=0x113, 0x70=0x1281;
+  only IDMA 0 (G0) enabled (en 0x4, src 0xb9005a0 = 1440x2960, base
+  0xcc000000); IDMA 1-5 off, so the scaling channels are free.
 
 ## Open work
 
