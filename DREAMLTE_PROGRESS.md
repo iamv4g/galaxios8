@@ -871,6 +871,31 @@ libOSMesa has install name @executable_path.
   (report 300: 2 files, 0xf5e5d0 bytes) through /dev/rufsroot0, then was
   itself killed by jetsam (per-process limit) copying the 16 MB dylib in one
   malloc. s8drop now raises its limit and copies in 1 MiB pieces.
+- c36: s8drop ran s8gltest; dyld refused `@executable_path/libOSMesa.8.dylib`
+  ("security policy does not allow @ path expansion"): the drop copy now has
+  the absolute install name /private/var/tmp/s8drop/libOSMesa.8.dylib.
+  (memorystatus_control SET_JETSAM_TASK_LIMIT returns EINVAL; chunked copy
+  alone kept s8drop alive.)
+- c37: **Panfrost screen created** ("Mali-G71 (Panfrost)", 8 BOs, one job
+  done), then SIGABRT. c38 (crash reporter in s8gltest: backtrace offsets +
+  Mesa's stderr as reports): "MESA: error: munmap failed: Invalid argument"
+  from panfrost_bo_munmap <- pool cleanup <- batch submit <- glFinish.
+  IOConnectUnmapMemory64 fails because clientMemoryForType made a new
+  descriptor per call (IOKit finds the mapping through the descriptor).
+  Kernel: one descriptor per BO (built, c40). s8drm: falls back to munmap().
+
+### GPU milestone 4: OpenGL on the Mali from iOS (c39, 2026-10-24)
+
+c39 = c35 kernel, drop g4 (Mesa with the munmap fallback). **s8gltest
+passed on the phone**: GL_RENDERER "Mali-G71 (Panfrost)"; glClear red ->
+pixel 0xff0000ff; fixed-function green triangle: centre 0xff00ff00, corner
+red, all 10 probe pixels right; 120 frames of clear + 64 triangles at
+1125x2436 with glFinish: **141.8 ms per frame** (includes OSMesa's copy of
+the 11 MB colour buffer into the caller's memory on every glFinish, read
+from write-combined memory: probably most of it; not yet measured apart);
+glGetError 0. Kernel: "s8gltest closed: 19 BOs, 487 submits, 487 done; 0
+faults, 0 resets". First GPU-rendered OpenGL on this port. Not yet: any
+iOS app or CoreAnimation using it (OSMesa renders off-screen).
 
 ## Open work
 

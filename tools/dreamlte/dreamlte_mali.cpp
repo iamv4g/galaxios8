@@ -154,6 +154,8 @@ struct s8_bo {
 	uint64_t va;            /* GPU virtual address */
 	uint64_t vsize;         /* bytes of GPU VA */
 	uint32_t flags;
+	/* one descriptor per BO: IOConnectUnmapMemory finds the mapping through it (c38) */
+	IOMemoryDescriptor *md;
 };
 
 class S8MaliUserClient;
@@ -523,7 +525,10 @@ S8Mali::boCreate(uint64_t size, uint32_t flags)
 	bo->vsize = vsize;
 	bo->flags = flags;
 	bzero(boKernel(bo), (size_t)backed);
-	if (!mapRange(bo->va, bo->pa, backed, (flags & BO_NOEXEC) != 0)) {
+	bo->md = IOMemoryDescriptor::withPhysicalAddress((IOPhysicalAddress)bo->pa, (IOByteCount)backed,
+	    kIODirectionInOut);
+	if (bo->md == NULL || !mapRange(bo->va, bo->pa, backed, (flags & BO_NOEXEC) != 0)) {
+		OSSafeReleaseNULL(bo->md);
 		IOFree(bo, sizeof(*bo));
 		return NULL;
 	}
@@ -538,6 +543,7 @@ S8Mali::boFree(s8_bo *bo)
 	unmapRange(bo->va, bo->backed);
 	bm_set(fPageMap, (bo->pa - BO_PHYS) / BO_UNIT, bo->backed / BO_UNIT, false);
 	bm_set(fVAMap, (bo->va - VA_BASE) / VA_UNIT, bo->vsize / VA_UNIT, false);
+	OSSafeReleaseNULL(bo->md);
 	IOFree(bo, sizeof(*bo));
 }
 
@@ -851,8 +857,10 @@ S8MaliUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options,
 {
 	IOLockLock(fGPU->fLock);
 	s8_bo *bo = lookup(type);
-	IOMemoryDescriptor *md = bo != NULL ?
-	    IOMemoryDescriptor::withPhysicalAddress((IOPhysicalAddress)bo->pa, (IOByteCount)bo->backed, kIODirectionInOut) : NULL;
+	IOMemoryDescriptor *md = bo != NULL ? bo->md : NULL;
+	if (md != NULL) {
+		md->retain();                   /* the caller releases it */
+	}
 	IOLockUnlock(fGPU->fLock);
 	if (md == NULL) {
 		return kIOReturnBadArgument;

@@ -200,8 +200,13 @@ s8_drm_munmap(void *address, size_t size)
 			uint32_t handle = maps[i].handle;
 			maps[i].addr = 0;
 			pthread_mutex_unlock(&lock);
-			return IOConnectUnmapMemory64(conn, handle, mach_task_self(), (mach_vm_address_t)(uintptr_t)address) ==
-			       KERN_SUCCESS ? 0 : -1;
+			if (IOConnectUnmapMemory64(conn, handle, mach_task_self(),
+			    (mach_vm_address_t)(uintptr_t)address) == KERN_SUCCESS) {
+				return 0;
+			}
+			/* kernels before c39 hand out a new descriptor per call, so IOKit cannot find
+			 * the mapping (c38: Mesa aborted on "munmap failed"): drop the range itself */
+			return munmap(address, size);
 		}
 	}
 	pthread_mutex_unlock(&lock);

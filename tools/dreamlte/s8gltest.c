@@ -11,6 +11,8 @@
  *    6  glGetError at the end, OSMesa context (1 = made)
  *    7  memorystatus_control (raise the jetsam limit to 1 GiB): return value, errno
  *  200+ stderr (Mesa's messages), 16 bytes per report
+ *  400+ on SIGABRT/SIGSEGV/SIGBUS: frame i, (image: 0 s8gltest, 1 libOSMesa, 2 other) << 56 |
+ *       offset in that image (atos -o IMAGE -l 0 OFFSET), then 499: signal
  *  100 / 99  all checks passed / something failed
  *
  *   xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O2 \
@@ -25,6 +27,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <signal.h>
+#include <dlfcn.h>
+#include <execinfo.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <CoreFoundation/CoreFoundation.h>
@@ -74,6 +79,28 @@ report_stderr(const char *path)
 	}
 }
 
+static const char *errpath = "/private/var/tmp/s8gltest.err";
+
+static void
+on_fatal(int sig)
+{
+	void *frames[32];
+	int n = backtrace(frames, 32);
+	for (int i = 0; i < n; i++) {
+		Dl_info info;
+		uint64_t image = 2, off = (uint64_t)(uintptr_t)frames[i];
+		if (dladdr(frames[i], &info) && info.dli_fbase != NULL) {
+			off = (uint64_t)((uintptr_t)frames[i] - (uintptr_t)info.dli_fbase);
+			image = strstr(info.dli_fname, "s8gltest") ? 0 : strstr(info.dli_fname, "OSMesa") ? 1 : 2;
+		}
+		report(400 + (uint64_t)i, image << 56 | off, 0);
+	}
+	report_stderr(errpath);
+	report(499, (uint64_t)sig, 0);
+	signal(sig, SIG_DFL);
+	raise(sig);
+}
+
 extern int memorystatus_control(uint32_t command, int32_t pid, uint32_t flags, void *buffer, size_t size);
 #define MEMORYSTATUS_CMD_SET_JETSAM_TASK_LIMIT 6
 
@@ -99,7 +126,9 @@ main(void)
 	/* launchd jobs get a small default jetsam limit (c33: killed, per-process limit) */
 	int mrc = memorystatus_control(MEMORYSTATUS_CMD_SET_JETSAM_TASK_LIMIT, getpid(), 1024, NULL, 0);
 	report(7, (uint64_t)(int64_t)mrc, mrc ? errno : 0);
-	const char *errpath = "/private/var/tmp/s8gltest.err";
+	signal(SIGABRT, on_fatal);
+	signal(SIGSEGV, on_fatal);
+	signal(SIGBUS, on_fatal);
 	int efd = open(errpath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 	if (efd >= 0) {
 		dup2(efd, 2);

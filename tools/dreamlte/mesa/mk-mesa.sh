@@ -70,9 +70,9 @@ ninja -C build src/gallium/targets/osmesa/libOSMesa.8.dylib > ninja.log
 cp build/src/gallium/targets/osmesa/libOSMesa.8.dylib out/libOSMesa.8.dylib
 install_name_tool -id /usr/local/lib/libOSMesa.8.dylib out/libOSMesa.8.dylib
 codesign -f -s - out/libOSMesa.8.dylib
-# the same library for the drop zone (tools/dreamlte/s8drop.c): next to the program using it
+# the same library for the drop zone (tools/dreamlte/s8drop.c), where s8drop extracts it
 mkdir -p out/drop
 cp out/libOSMesa.8.dylib out/drop/libOSMesa.8.dylib
-install_name_tool -id @executable_path/libOSMesa.8.dylib out/drop/libOSMesa.8.dylib
+install_name_tool -id /private/var/tmp/s8drop/libOSMesa.8.dylib out/drop/libOSMesa.8.dylib  # dyld refuses @ paths here (c36)
 codesign -f -s - out/drop/libOSMesa.8.dylib
 echo "mk-mesa.sh: $B/out/libOSMesa.8.dylib, out/drop/libOSMesa.8.dylib ($(stat -f %z out/libOSMesa.8.dylib) bytes)"
