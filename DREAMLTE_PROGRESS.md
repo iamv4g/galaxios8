@@ -1143,6 +1143,26 @@ The user: the phone gets hot (gpu-b/gpu-c; in iOS `S8 DVFS` 63-76 C at fixed 170
   MHz; 23 taps, no backboardd crash, Settings drawn right. Photos still aborts (old).
 - 2026-10-24 19:47: **BOOT = `s8-gpu-d-boot.img`** (SHA-256 9f54ac3f...6559, read back; kernel
   c68, gpu-c's args + `s8gov=1`), drop zone = drop-ca16. Rebooted into iOS for the user.
+- **gpu-d hands-on (user):** frame rate "often drops", which they put down to the governor's lag.
+  Measured: the frame's CPU part is ~0.38-0.40 ms per draw in c62, c69 and c70 alike (not
+  clock-bound), but the presenter's panel copy (kernel thread, scaling to 1367x2960) went from
+  ~9.0 ms (c62, fixed clocks) to 11.2-13.6 ms (c69, governor): the panel's rate is what dropped.
+- **Kernel c70: boost.** `s8_dvfs_kick(ms)`: a touch (S6SY761 press/move, 1 s) or a GPU submit
+  (S8Mali selector 3, 250 ms) puts both clusters at their ceilings and wakes the governor at once
+  (it waits on the boost event instead of IOSleep); temperature and the 30 s report are now
+  time-based; the report adds "boosted N of M ticks".
+- **c70** (c69's soak): panel copy back to 9.1-9.8 ms, TMU 45-53 C, boosted ~13 % of ticks during
+  the soak, 0 while idle. **But backboardd crashed once** at 714 s: SIGSEGV writing at 0x60 into
+  an unmapped page right after a 64 KiB IOKit (tag 21) mapping, in `pan_preload_fb_part` <-
+  `panfrost_batch_submit` <- `_mesa_fence_sync` (a fresh batch-pool BO whose CPU mapping is not
+  there). New in this run; cause not found. s8drm now reports mapping anomalies: 0x4d map failed,
+  0x44 an address mapped twice, 0x46 map table full, 0x55 IOKit unmap failed (fallback munmap),
+  0x75 munmap of an address not mapped by s8drm.
+- **c71** (c70 repeated with that Mesa): ran to the end, no crash, none of those reports; panel copy
+  9.0-9.9 ms, TMU 46-55 C.
+- 2026-10-24 20:55: **BOOT = `s8-gpu-e-boot.img`** (SHA-256 4d6ef2fc...7e9f, read back; kernel c70,
+  gpu-d's args), drop zone = drop-ca21 (Mesa with the mapping reports). Rebooted into iOS for the
+  user.
 - Also seen, older and not heat: the Preferences crash (CoreImage EAGL) and Photos abort.
 
 ### GPU: next steps (plan, not started)

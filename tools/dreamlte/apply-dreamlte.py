@@ -1605,6 +1605,10 @@ S8_DVFS = r'''
  * each cluster runs at the lowest level that keeps its busiest CPU at most
  * 80 % busy at that clock (up at once, down after 120 ms). Busy time is
  * what is not idle: cpu_idle's processor_idle notifications around WFI.
+ * Boost: a touch (1 s) or a GPU submit (250 ms, a frame being drawn) puts both
+ * clusters at their ceilings at once (s8_dvfs_kick wakes the governor); load
+ * alone reacts a tick late and misses the CPU's share of a frame while it
+ * waits for the GPU.
  */
 #define S8_TMU_BASE		0x10080000
 #define S8_ACPM_MBOX		0x16440000
@@ -1823,6 +1827,22 @@ s8_tmu_temp(void)
 	return hot;
 }
 
+/* Ceiling clocks until this time (mach_absolute_time, 26 MHz): s8_dvfs_kick. */
+static volatile uint64_t s8_boost_until;
+
+extern "C" void
+s8_dvfs_kick(uint32_t ms)
+{
+	uint64_t now = mach_absolute_time(), until = now + (uint64_t)ms * 26000;
+	uint64_t old = s8_boost_until;
+	if (until > old) {
+		s8_boost_until = until;
+		if (old < now) {
+			thread_wakeup((event_t)&s8_boost_until);
+		}
+	}
+}
+
 /* Idle time per CPU, from cpu_idle / cpu_idle_exit (interrupts off, on that CPU). */
 static uint64_t s8_idle_total[8], s8_idle_since[8];
 
@@ -1946,7 +1966,7 @@ s8_dvfs_thread(void *arg __unused, wait_result_t wr __unused)
 	s8_dvfs_set(big, lit, &cur_big, &cur_lit);
 	IOLog("S8 DVFS: big %u lit %u kHz; PLL %u / %u MHz; governor %s\n",
 	    s8_big_levels[cur_big], s8_lit_levels[cur_lit], s8_pll_mhz(s8_cmu0), s8_pll_mhz(s8_cmu1),
-	    gov ? "on (40 ms, 80 %)" : "off");
+	    gov ? "on (40 ms, 80 %, touch / GPU boost)" : "off");
 	const uint32_t tick_ms = gov ? 40 : 1000, per_s = 1000 / tick_ms;
 	uint64_t prev_idle[8], prev = mach_absolute_time();
 	for (int c = 0; c < 8; c++) {
@@ -1954,11 +1974,21 @@ s8_dvfs_thread(void *arg __unused, wait_result_t wr __unused)
 	}
 	/* for the 30 s report: clock-weighted ticks, busiest-CPU load, level changes */
 	uint64_t sum_big = 0, sum_lit = 0, sum_ubig = 0, sum_ulit = 0, n = 0, changes = 0;
-	uint64_t worst_set = 0;
+	uint64_t worst_set = 0, boosted = 0;
+	uint64_t last_temp = prev, last_report = prev;
 	int hold_big = 0, hold_lit = 0;
-	for (uint32_t tick = 1, cool = 0, hot_max = temp;; tick++) {
-		IOSleep(tick_ms);
-		if (tick % per_s == 0) {
+	(void)per_s;
+	for (uint32_t cool = 0, hot_max = temp;;) {
+		if (gov && s8_boost_until <= mach_absolute_time()) {
+			assert_wait_timeout((event_t)&s8_boost_until, THREAD_UNINT, tick_ms, 1000 * NSEC_PER_USEC);
+			thread_block(THREAD_CONTINUE_NULL);
+		} else {
+			IOSleep(tick_ms);
+		}
+		uint64_t tnow = mach_absolute_time();
+		bool boost = gov && tnow < s8_boost_until;
+		if (tnow - last_temp >= 26000000ULL) {
+			last_temp = tnow;
 			temp = s8_tmu_temp();
 			if (temp == 0 || temp >= 95) {
 				IOLog("S8 DVFS: TMU %d C, back to the S-Boot clocks, guard stops\n", temp);
@@ -2014,6 +2044,12 @@ s8_dvfs_thread(void *arg __unused, wait_result_t wr __unused)
 			if (nl < lit) {
 				nl = lit;
 			}
+			if (boost) {
+				nb = big;
+				nl = lit;
+				hold_big = hold_lit = 0;
+				boosted++;
+			}
 			sum_ubig += ubig;
 			sum_ulit += ulit;
 		}
@@ -2034,13 +2070,15 @@ s8_dvfs_thread(void *arg __unused, wait_result_t wr __unused)
 		sum_big += s8_big_levels[cur_big] / 1000;
 		sum_lit += s8_lit_levels[cur_lit] / 1000;
 		n++;
-		if ((!gov && (ob != cur_big || ol != cur_lit)) || tick % (30 * per_s) == 0) {
+		if ((!gov && (ob != cur_big || ol != cur_lit)) || tnow - last_report >= 30 * 26000000ULL) {
+			last_report = tnow;
 			IOLog("S8 DVFS: %d C (max %u), big %u lit %u kHz; 30 s: mean big %llu lit %llu MHz, "
-			    "busiest CPU big %llu lit %llu per mille, %llu changes (slowest %llu us), ceiling %u / %u\n",
+			    "busiest CPU big %llu lit %llu per mille, %llu changes (slowest %llu us), "
+			    "boosted %llu of %llu ticks, ceiling %u / %u\n",
 			    temp, hot_max, s8_big_levels[cur_big], s8_lit_levels[cur_lit],
 			    sum_big / n, sum_lit / n, sum_ubig / n, sum_ulit / n, changes,
-			    worst_set / 26, s8_big_levels[big] / 1000, s8_lit_levels[lit] / 1000);
-			sum_big = sum_lit = sum_ubig = sum_ulit = n = changes = worst_set = 0;
+			    worst_set / 26, boosted, n, s8_big_levels[big] / 1000, s8_lit_levels[lit] / 1000);
+			sum_big = sum_lit = sum_ubig = sum_ulit = n = changes = worst_set = boosted = 0;
 		}
 	}
 	thread_terminate(current_thread());

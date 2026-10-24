@@ -64,6 +64,7 @@ extern "C" boolean_t pmap_valid_address(uint64_t addr);
 extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern "C" kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
 extern "C" void thread_deallocate(thread_t);
+extern "C" void s8_dvfs_kick(uint32_t ms);       /* SweetCPU.cpp: CPU clocks to the ceiling for a while */
 extern "C" vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size, unsigned int flags);
 #ifndef VM_WIMG_WCOMB
 #define VM_WIMG_WCOMB 0x6                 /* osfmk/arm/memory_types.h */
@@ -1130,6 +1131,7 @@ S8MaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *a
 		break;
 	}
 	case 3:                                         /* Submit */
+		s8_dvfs_kick(250);                      /* a frame is being drawn: CPU clocks up */
 		out[0] = fGPU->submit(in[0], (uint32_t)in[1]);
 		fSubmits++;
 		fDone += out[0] == 1;

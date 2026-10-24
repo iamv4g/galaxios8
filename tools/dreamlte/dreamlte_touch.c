@@ -119,6 +119,8 @@ s8ts_cmd_read(uint8_t cmd, uint8_t *r, unsigned rlen)
 	return s8i2c_xfer(s8ts_i2c, S8TS_ADDR, &cmd, 1, r, rlen);
 }
 
+extern void s8_dvfs_kick(uint32_t ms);  /* SweetCPU.cpp: ceiling clocks for a while */
+
 static void
 s8ts_report(const uint8_t *ev)
 {
@@ -153,6 +155,7 @@ s8ts_report(const uint8_t *ev)
 		y = (unsigned)py * 1920 / 2436;
 	}
 	if (state == 1 || state == 2) {             /* press, move */
+		s8_dvfs_kick(1000);
 		if (!s8ts_down[tid]) {
 			printf("S8 TOUCH: down id=%u x=%u y=%u\n", tid, x, y);
 		}

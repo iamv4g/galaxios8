@@ -229,11 +229,19 @@ s8_drm_mmap(int fd, uint64_t offset, size_t size)
 	if ((offset & 0xffffffffu) != 0 ||
 	    IOConnectMapMemory64(conn, handle, mach_task_self(), &addr, &len,
 	    kIOMapAnywhere | kIOMapWriteCombineCache) != KERN_SUCCESS || len < size) {
+		s8_drm_report(0x4d, handle, (uint64_t)len << 32 | (size & 0xffffffff));
 		errno = ENOMEM;
 		return MAP_FAILED;
 	}
 	pthread_mutex_lock(&lock);
-	for (int i = 0; i < MAX_MAPS; i++) {
+	int i;
+	for (i = 0; i < MAX_MAPS; i++) {
+		if (maps[i].addr == (uintptr_t)addr) {
+			/* IOKit gave an address we still list: the same memory mapped twice */
+			s8_drm_report(0x44, (uint64_t)addr, (uint64_t)maps[i].handle << 32 | handle);
+		}
+	}
+	for (i = 0; i < MAX_MAPS; i++) {
 		if (maps[i].addr == 0) {
 			maps[i].addr = (uintptr_t)addr;
 			maps[i].handle = handle;
@@ -241,6 +249,9 @@ s8_drm_mmap(int fd, uint64_t offset, size_t size)
 		}
 	}
 	pthread_mutex_unlock(&lock);
+	if (i == MAX_MAPS) {
+		s8_drm_report(0x46, (uint64_t)addr, handle);   /* table full: munmap will not find it */
+	}
 	return (void *)(uintptr_t)addr;
 }
 
@@ -259,10 +270,13 @@ s8_drm_munmap(void *address, size_t size)
 			}
 			/* kernels before c39 hand out a new descriptor per call, so IOKit cannot find
 			 * the mapping (c38: Mesa aborted on "munmap failed"): drop the range itself */
+			s8_drm_report(0x55, (uint64_t)(uintptr_t)address, (uint64_t)handle << 32 | (size & 0xffffffff));
 			return munmap(address, size);
 		}
 	}
 	pthread_mutex_unlock(&lock);
+	/* not one of ours: c70's backboardd crash wrote into a pool BO's vanished mapping */
+	s8_drm_report(0x75, (uint64_t)(uintptr_t)address, size);
 	return munmap(address, size);
 }
 
