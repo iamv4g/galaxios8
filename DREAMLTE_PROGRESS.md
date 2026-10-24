@@ -1141,7 +1141,7 @@ The user: the phone gets hot (gpu-b/gpu-c; in iOS `S8 DVFS` 63-76 C at fixed 170
   in all** (was 179 s), launchd 0.3 s, mediaserverd and vmd not in the top 10; TMU **45-55 C
   during the soak, 48 C idle** (c62 69-73 C, c63 62-69 C); mean clocks A53 ~600, Mongoose ~780
   MHz; 23 taps, no backboardd crash, Settings drawn right. Photos still aborts (old).
-- 2026-10-24 19:50: **BOOT = `s8-gpu-d-boot.img`** (SHA-256 9f54ac3f...6559, read back; kernel
+- 2026-10-24 19:47: **BOOT = `s8-gpu-d-boot.img`** (SHA-256 9f54ac3f...6559, read back; kernel
   c68, gpu-c's args + `s8gov=1`), drop zone = drop-ca16. Rebooted into iOS for the user.
 - Also seen, older and not heat: the Preferences crash (CoreImage EAGL) and Photos abort.
 
