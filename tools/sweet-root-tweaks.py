@@ -16,7 +16,9 @@ screen (image versions v8-v14 in NOTES.md):
                   (on iOS they live on the data volume)
   migration       LastSystemVersion so DataMigration does not run for an hour
                   on every boot
-  audio           VirtualAudio HAL plug-in disabled (mediaserverd crash)
+  audio           VirtualAudio HAL plug-in disabled (mediaserverd crash);
+                  BTAudioHALPlugin disabled (no bluetoothd: its XPC connection's
+                  error handler reconnects at once, mediaserverd ~0.5 CPU, galaxios8 c68)
   MediaToolbox    StartRecorderServer=false (camera filter prewarm calls a
                   NULL OpenGL function without a GPU -> mediaserverd crash loop)
   SpringBoard     BKNoWatchdogs (one slow CPU path, no scene-create watchdog
@@ -67,6 +69,9 @@ REMOVED_JOBS = {
     # run p7: started hundreds of times, each exits at once
     'com.apple.lskdd',                  # AppleKeyServices (needs the SEP)
     'com.apple.nanotimekitcompaniond',  # Apple Watch faces
+    # galaxios8 c64-c67: with CommCenter gone, Visual Voicemail's CoreTelephony client
+    # reconnects without pause: vmd ~1 CPU, launchd and logd another ~1.5 serving it
+    'com.apple.voicemail.vmd',
 }
 
 
@@ -131,12 +136,22 @@ def audio(root):
         os.makedirs(dst_dir, exist_ok=True)
         shutil.move(src, dst_dir)
         print('VirtualAudio.plugin disabled')
+    bt_audio(root)
     for conf in glob.glob(os.path.join(root, 'System/Library/Frameworks/MediaToolbox.framework/*/SubServerConfiguration.plist')):
         st = os.stat(conf)
         data = load(conf)
         data['StartRecorderServer'] = False
         save(conf, data, st.st_uid, st.st_gid, st.st_mode & 0o7777, plistlib.FMT_XML)
         print('StartRecorderServer off', os.path.relpath(conf, root))
+
+
+def bt_audio(root):
+    src = os.path.join(root, 'System/Library/Audio/Plug-Ins/HAL/BTAudioHALPlugin.driver')
+    dst_dir = os.path.join(root, 'System/Library/Audio/Plug-Ins/HAL.disabled')
+    if os.path.exists(src):
+        os.makedirs(dst_dir, exist_ok=True)
+        shutil.move(src, dst_dir)
+        print('BTAudioHALPlugin.driver disabled')
 
 
 REDUCE_EFFECTS = '--reduce-effects' in sys.argv

@@ -1099,6 +1099,52 @@ QuartzCore 16.7.16 `EAGLServer::renderer()` has the same order (Metal, then
 - **gpu-c hands-on (user's words):** "much better, it no longer happens": no more freezes or
   backboardd restarts (no log pulled for this session).
 
+### Heat: CPU load governor and busy daemons (c63-c68, 2026-10-24)
+
+The user: the phone gets hot (gpu-b/gpu-c; in iOS `S8 DVFS` 63-76 C at fixed 1703/1690 MHz).
+
+- **Load governor (kernel c63, boot-arg `s8gov=1`):** s8big/s8lit and the thermal guard's levels
+  become ceilings; every 40 ms each cluster takes the lowest ECT level that keeps its busiest
+  CPU at most 80 % busy (up at once, down after 3 ticks). Busy = not idle: SweetCPU now registers
+  `processor_idle` (cpu_idle / cpu_idle_exit around WFI) and counts idle time per CPU. The
+  30 s `S8 DVFS` line gives mean clocks, busiest-CPU load, level changes and the slowest ACPM
+  request. **c63** (c62's app soak): works, a change takes 0.2-0.4 ms, the Mongoose cluster
+  mostly at 741 MHz; but even idle after the soak the busiest A53 stayed ~73 % busy, so the
+  A53s stayed at 1690 MHz and the TMU at 62-63 C.
+- **`tools/dreamlte/s8top.c`** (drop zone, forks to the background): CPU time per process and
+  kernel_task thread over `s8top=START+LEN,...` windows, as S8Mali reports 900-939;
+  `s8stop=NAME,...@T` SIGSTOPs processes (launchd does not restart a stopped one).
+  **c64:** idle, 60 s window: launchd 71 s, **vmd 58 s**, **mediaserverd 25 s**, logd 17 s of
+  CPU (~3 CPUs busy doing nothing visible); the kernel ~2 s.
+- **c65** (`sweetsample=` stacks): vmd (Visual Voicemail) in `-[CoreTelephonyClientMux
+  _connect_sync]` -> `xpc_connection_bootstrap_look_up_slow`: CommCenter was removed (no
+  baseband) and its client looks it up again at once; launchd serves and logs each lookup.
+- **c66** (`s8stop=vmd@240`): total 179 -> 84 s per minute, logd 16 -> 1 s, launchd 70 -> 44 s.
+  **c67** (`s8stop=vmd,mediaserverd@240`): total **7.7 s per minute**, launchd 0.4 s; A53s at
+  455-500 MHz, Mongoose 741 MHz, busiest CPU 7 %, TMU down to 51 C and falling.
+- **c68** (kernel c68: `sweetsample_at= sweetsample_s= sweetsample_n=`; mediaserverd every 4 s):
+  its busy thread is an XPC event handler in **BTAudioHALPlugin.driver** (load base found from
+  the return addresses: it calls `xpc_connection_resume` again from its error handler) - the
+  Bluetooth audio HAL plug-in reconnecting to bluetoothd, which was removed.
+- **Fix (root, `edit-live-root.sh LIVE quiet`):** launchd job `com.apple.voicemail.vmd` removed
+  and `BTAudioHALPlugin.driver` moved to `System/Library/Audio/Plug-Ins/HAL.disabled`
+  (`tools/sweet-root-tweaks.py`, also for new roots).
+- Root edit 2026-10-24: `live.img` pulled from TWRP (16 GiB, 9 min), `edit-live-root.sh ...
+  quiet`, fsck clean before and after, 7 changed 32 MiB chunks (0, 22, 26, 49, 200, 215, 240).
+  `edit-live-root.sh` now compares in the VM and brings back only those chunks into a sparse
+  `live.img.edited` (a full 16 GiB copy would have left the Mac ~5 GiB free). First write: chunk
+  26 failed verification 8 times: `limactl cp` had not replaced the temp file, so the chunk held
+  chunk 22's data, and that wrong data was on sda24 at chunk 26 until rewritten. The script now
+  removes the temp file and checks each chunk's SHA-256; rebuilt from the VM copy, all 7
+  rewritten, read back and matching (no boot in between).
+- **c69** (kernel c68, edited root, `s8gov=1`, c62's soak + idle): idle 60 s window **8.8 s CPU
+  in all** (was 179 s), launchd 0.3 s, mediaserverd and vmd not in the top 10; TMU **45-55 C
+  during the soak, 48 C idle** (c62 69-73 C, c63 62-69 C); mean clocks A53 ~600, Mongoose ~780
+  MHz; 23 taps, no backboardd crash, Settings drawn right. Photos still aborts (old).
+- 2026-10-24 19:50: **BOOT = `s8-gpu-d-boot.img`** (SHA-256 9f54ac3f...6559, read back; kernel
+  c68, gpu-c's args + `s8gov=1`), drop zone = drop-ca16. Rebooted into iOS for the user.
+- Also seen, older and not heat: the Preferences crash (CoreImage EAGL) and Photos abort.
+
 ### GPU: next steps (plan, not started)
 
 0. CoreAnimation on the Mali draws the lock screen, home screen and App Library right (c61).

@@ -436,6 +436,18 @@ edit('bsd/dev/sweet_ufs.c', [
 edit('bsd/dev/sweet_sample.c', [
     ('#if defined(ARM64_BOARD_CONFIG_SWEET)\n/*\n * SWEET process sampler',
      '#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)\n/*\n * SWEET process sampler', 1),
+    # Denser sampling to find a busy loop: sweetsample_at= first sample (s, default 90),
+    # sweetsample_s= interval (s, default 120), sweetsample_n= samples (default 40).
+    ('\t(void)tsleep(&chan, PZERO, "sweetsmp", 90 * hz);\n'
+     '\tfor (int i = 0; i < 40; i++) {\n',
+     '\tuint32_t at = 90, every = 120, count = 40;\n'
+     '\tPE_parse_boot_argn("sweetsample_at", &at, sizeof(at));\n'
+     '\tPE_parse_boot_argn("sweetsample_s", &every, sizeof(every));\n'
+     '\tPE_parse_boot_argn("sweetsample_n", &count, sizeof(count));\n'
+     '\t(void)tsleep(&chan, PZERO, "sweetsmp", (int)at * hz);\n'
+     '\tfor (int i = 0; i < (int)count; i++) {\n', 1),
+    ('\t\t(void)tsleep(&chan, PZERO, "sweetsmp", 120 * hz);\n',
+     '\t\t(void)tsleep(&chan, PZERO, "sweetsmp", (int)(every ? every : 1) * hz);\n', 1),
 ])
 
 # rd=ufsroot0 also on the A5XELTE machine config (the S8 build).
@@ -1589,6 +1601,10 @@ S8_DVFS = r'''
  * Guard: >= 80 C one level down per second, <= 70 C one level back up per
  * 5 s, >= 95 C or an implausible reading: both clusters to the S-Boot
  * clocks (1066 / 1053 MHz) and the guard stops.
+ * s8gov=1: the targets (and the guard's levels) become ceilings; every 40 ms
+ * each cluster runs at the lowest level that keeps its busiest CPU at most
+ * 80 % busy at that clock (up at once, down after 120 ms). Busy time is
+ * what is not idle: cpu_idle's processor_idle notifications around WFI.
  */
 #define S8_TMU_BASE		0x10080000
 #define S8_ACPM_MBOX		0x16440000
@@ -1807,6 +1823,46 @@ s8_tmu_temp(void)
 	return hot;
 }
 
+/* Idle time per CPU, from cpu_idle / cpu_idle_exit (interrupts off, on that CPU). */
+static uint64_t s8_idle_total[8], s8_idle_since[8];
+
+static void
+s8_cpu_idle(cpu_id_t cpu_id __unused, boolean_t enter, uint64_t *new_timeout_ticks __unused)
+{
+	int c = cpu_number();
+	if (c < 0 || c >= 8) {
+		return;
+	}
+	uint64_t now = mach_absolute_time();
+	if (enter) {
+		__atomic_store_n(&s8_idle_since[c], now, __ATOMIC_RELAXED);
+	} else {
+		uint64_t since = __atomic_exchange_n(&s8_idle_since[c], 0, __ATOMIC_RELAXED);
+		if (since != 0 && now > since) {
+			__atomic_add_fetch(&s8_idle_total[c], now - since, __ATOMIC_RELAXED);
+		}
+	}
+}
+
+static uint64_t
+s8_idle_now(int c, uint64_t now)
+{
+	uint64_t since = __atomic_load_n(&s8_idle_since[c], __ATOMIC_RELAXED);
+	uint64_t total = __atomic_load_n(&s8_idle_total[c], __ATOMIC_RELAXED);
+	return total + (since != 0 && now > since ? now - since : 0);
+}
+
+/* Lowest level (highest index) from ceiling cap down that gives need kHz. */
+static int
+s8_pick(const uint32_t *levels, int n, int cap, uint64_t need)
+{
+	int i = n - 1;
+	while (i > cap && levels[i] < need) {
+		i--;
+	}
+	return i;
+}
+
 static int
 s8_level(const uint32_t *levels, int n, uint32_t khz)
 {
@@ -1884,34 +1940,107 @@ s8_dvfs_thread(void *arg __unused, wait_result_t wr __unused)
 		thread_terminate(current_thread());
 		return;
 	}
-	int big = want_big, lit = want_lit;
+	int big = want_big, lit = want_lit;    /* the guard's levels: ceilings with s8gov=1 */
+	uint32_t gov = 0;
+	PE_parse_boot_argn("s8gov", &gov, sizeof(gov));
 	s8_dvfs_set(big, lit, &cur_big, &cur_lit);
-	IOLog("S8 DVFS: big %u lit %u kHz; PLL %u / %u MHz\n",
-	    s8_big_levels[cur_big], s8_lit_levels[cur_lit], s8_pll_mhz(s8_cmu0), s8_pll_mhz(s8_cmu1));
+	IOLog("S8 DVFS: big %u lit %u kHz; PLL %u / %u MHz; governor %s\n",
+	    s8_big_levels[cur_big], s8_lit_levels[cur_lit], s8_pll_mhz(s8_cmu0), s8_pll_mhz(s8_cmu1),
+	    gov ? "on (40 ms, 80 %)" : "off");
+	const uint32_t tick_ms = gov ? 40 : 1000, per_s = 1000 / tick_ms;
+	uint64_t prev_idle[8], prev = mach_absolute_time();
+	for (int c = 0; c < 8; c++) {
+		prev_idle[c] = s8_idle_now(c, prev);
+	}
+	/* for the 30 s report: clock-weighted ticks, busiest-CPU load, level changes */
+	uint64_t sum_big = 0, sum_lit = 0, sum_ubig = 0, sum_ulit = 0, n = 0, changes = 0;
+	uint64_t worst_set = 0;
+	int hold_big = 0, hold_lit = 0;
 	for (uint32_t tick = 1, cool = 0, hot_max = temp;; tick++) {
-		IOSleep(1000);
-		temp = s8_tmu_temp();
-		if (temp == 0 || temp >= 95) {
-			IOLog("S8 DVFS: TMU %d C, back to the S-Boot clocks, guard stops\n", temp);
-			s8_dvfs_set(S8_BIG_BOOT < cur_big ? cur_big : S8_BIG_BOOT,
-			    S8_LIT_BOOT < cur_lit ? cur_lit : S8_LIT_BOOT, &cur_big, &cur_lit);
-			break;
+		IOSleep(tick_ms);
+		if (tick % per_s == 0) {
+			temp = s8_tmu_temp();
+			if (temp == 0 || temp >= 95) {
+				IOLog("S8 DVFS: TMU %d C, back to the S-Boot clocks, guard stops\n", temp);
+				s8_dvfs_set(S8_BIG_BOOT < cur_big ? cur_big : S8_BIG_BOOT,
+				    S8_LIT_BOOT < cur_lit ? cur_lit : S8_LIT_BOOT, &cur_big, &cur_lit);
+				break;
+			}
+			hot_max = (uint32_t)temp > hot_max ? (uint32_t)temp : hot_max;
+			if (temp >= 80) {
+				big = big + 1 < S8_NBIG ? big + 1 : big;
+				lit = lit + 1 < S8_NLIT ? lit + 1 : lit;
+				cool = 0;
+			} else if (temp <= 70 && ++cool >= 5) {
+				big = big > want_big ? big - 1 : big;
+				lit = lit > want_lit ? lit - 1 : lit;
+				cool = 0;
+			}
 		}
-		hot_max = (uint32_t)temp > hot_max ? (uint32_t)temp : hot_max;
-		if (temp >= 80) {
-			big = big + 1 < S8_NBIG ? big + 1 : big;
-			lit = lit + 1 < S8_NLIT ? lit + 1 : lit;
-			cool = 0;
-		} else if (temp <= 70 && ++cool >= 5) {
-			big = big > want_big ? big - 1 : big;
-			lit = lit > want_lit ? lit - 1 : lit;
-			cool = 0;
+		int nb = big, nl = lit;
+		if (gov) {
+			uint64_t now = mach_absolute_time(), dt = now - prev;
+			uint64_t ubig = 0, ulit = 0;          /* busiest CPU, per mille */
+			for (int c = 0; c < 8; c++) {
+				uint64_t idle = s8_idle_now(c, now), di = idle - prev_idle[c];
+				prev_idle[c] = idle;
+				uint64_t u = dt == 0 || di >= dt ? 0 : (dt - di) * 1000 / dt;
+				if (c < 4) {
+					ulit = u > ulit ? u : ulit;   /* cpus 0-3: A53 */
+				} else {
+					ubig = u > ubig ? u : ubig;   /* cpus 4-7: Mongoose */
+				}
+			}
+			prev = now;
+			/* clock that would leave the busiest CPU 80 % busy */
+			nb = ubig >= 900 ? big : s8_pick(s8_big_levels, S8_NBIG, big,
+			    (uint64_t)s8_big_levels[cur_big] * ubig / 800);
+			nl = ulit >= 900 ? lit : s8_pick(s8_lit_levels, S8_NLIT, lit,
+			    (uint64_t)s8_lit_levels[cur_lit] * ulit / 800);
+			/* up at once; down only after three ticks in a row asked for less */
+			if (nb > cur_big) {
+				nb = ++hold_big >= 3 ? nb : cur_big;
+			} else {
+				hold_big = 0;
+			}
+			if (nl > cur_lit) {
+				nl = ++hold_lit >= 3 ? nl : cur_lit;
+			} else {
+				hold_lit = 0;
+			}
+			if (nb < big) {
+				nb = big;
+			}
+			if (nl < lit) {
+				nl = lit;
+			}
+			sum_ubig += ubig;
+			sum_ulit += ulit;
 		}
 		int ob = cur_big, ol = cur_lit;
-		s8_dvfs_set(big, lit, &cur_big, &cur_lit);
-		if (ob != cur_big || ol != cur_lit || tick % 30 == 0) {
-			IOLog("S8 DVFS: %d C (max %u), big %u lit %u kHz\n", temp, hot_max,
-			    s8_big_levels[cur_big], s8_lit_levels[cur_lit]);
+		uint64_t t0 = mach_absolute_time();
+		s8_dvfs_set(nb, nl, &cur_big, &cur_lit);
+		if (ob != cur_big || ol != cur_lit) {
+			uint64_t d = mach_absolute_time() - t0;
+			worst_set = d > worst_set ? d : worst_set;
+			changes++;
+			if (ob != cur_big) {
+				hold_big = 0;
+			}
+			if (ol != cur_lit) {
+				hold_lit = 0;
+			}
+		}
+		sum_big += s8_big_levels[cur_big] / 1000;
+		sum_lit += s8_lit_levels[cur_lit] / 1000;
+		n++;
+		if ((!gov && (ob != cur_big || ol != cur_lit)) || tick % (30 * per_s) == 0) {
+			IOLog("S8 DVFS: %d C (max %u), big %u lit %u kHz; 30 s: mean big %llu lit %llu MHz, "
+			    "busiest CPU big %llu lit %llu per mille, %llu changes (slowest %llu us), ceiling %u / %u\n",
+			    temp, hot_max, s8_big_levels[cur_big], s8_lit_levels[cur_lit],
+			    sum_big / n, sum_lit / n, sum_ubig / n, sum_ulit / n, changes,
+			    worst_set / 26, s8_big_levels[big] / 1000, s8_lit_levels[lit] / 1000);
+			sum_big = sum_lit = sum_ubig = sum_ulit = n = changes = worst_set = 0;
 		}
 	}
 	thread_terminate(current_thread());
@@ -1920,6 +2049,12 @@ s8_dvfs_thread(void *arg __unused, wait_result_t wr __unused)
 edit('iokit/Kernel/arm/SweetCPU.cpp', [
     ('static uint32_t sweet_cpu_mhz[SWEET_SMP_MAX_CPUS];\n',
      'static uint32_t sweet_cpu_mhz[SWEET_SMP_MAX_CPUS];\n' + S8_DVFS, 1),
+    # Idle notifications for the s8gov load governor (s8_cpu_idle, above).
+    ('\tinfo.l3_cache_size = cpu->l3_cache_size;\n',
+     '\tinfo.l3_cache_size = cpu->l3_cache_size;\n'
+     '#if defined(DREAMLTE)\n'
+     '\tinfo.processor_idle = s8_cpu_idle;\n'
+     '#endif\n', 1),
     ('\tIOLog(CPU_PORT_NAME " CPU: %u/%u CPUs initialized, SGI1 verified\\n",\n'
      '\t    topology->num_cpus, topology->num_cpus);\n',
      '\tIOLog(CPU_PORT_NAME " CPU: %u/%u CPUs initialized, SGI1 verified\\n",\n'
