@@ -13,6 +13,8 @@
 #       effects       Reduce Transparency + Reduce Motion
 #       gputests      install s8malitest, s8gltest and libOSMesa (shim/dreamlte/out) with boot jobs
 #       drop          install shim/dreamlte/out/s8drop (drop-zone runner), drop the gputests jobs
+#       ca            install shim/dreamlte/out/libs8ca.dylib and insert it into backboardd
+#                     (CoreAnimation on the Mali with boot-arg s8ca=1; tools/dreamlte/ca)
 # Output: LIVE.img.edited and LIVE.img.changed.json (only the 32 MiB chunks
 # that differ), for tools/dreamlte/flash-chunks.sh.
 set -euo pipefail
@@ -59,6 +61,8 @@ elif step == 'effects':
     t.reduce_effects(root)
 elif step == 'drop':
     t.drop(root, os.path.join(tools, '..', 'shim/dreamlte/out'))
+elif step == 'ca':
+    t.ca(root, os.path.join(tools, '..', 'shim/dreamlte/out'))
 elif step == 'gputests':
     t.gputests(root, os.path.join(tools, '..', 'shim/dreamlte/out'))
 else:

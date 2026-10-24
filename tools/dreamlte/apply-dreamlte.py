@@ -2651,3 +2651,78 @@ edit('bsd/dev/sweet_ufs.c', [
      '\t\t\t}\n'
      '\t\t\tif (!error) {\n', 1),
 ])
+
+# CoreAnimation on the Mali: our OpenGL ES library goes into backboardd with
+# DYLD_INSERT_LIBRARIES. dyld honours DYLD_* variables, @paths and inserted
+# libraries only when AMFI answers its "check dyld policy" request
+# (__mac_syscall("AMFI", 0x5a, {flags in, &flags out})); without a policy named
+# "AMFI" the call fails, dyld allows none of it and drops the variables (c36:
+# "security policy does not allow @ path expansion"). A policy of that name
+# with only this syscall answers "everything allowed", including
+# AMFI_DYLD_OUTPUT_ALLOW_FAILED_LIBRARY_INSERTION (0x20): a library that does
+# not load does not kill the process. Boot-arg s8dyld=0: as before.
+edit('bsd/kern/sweet_amfi.c', [
+    ('static mac_policy_handle_t sweet_amfi_mac_handle;\n',
+     'static mac_policy_handle_t sweet_amfi_mac_handle;\n'
+     '\n'
+     '#if defined(ARM64_BOARD_CONFIG_A5XELTE)\n'
+     '#include <pexpert/pexpert.h>\n'
+     '#include <pexpert/arm64/board_config.h>\n'
+     '#endif\n'
+     '#if defined(DREAMLTE)\n'
+     '#define S8_AMFI_CHECK_DYLD_POLICY       0x5a\n'
+     '#define S8_AMFI_DYLD_OUTPUT_ALLOW_ALL   0xffULL\n'
+     '\n'
+     'static int\n'
+     's8_amfi_syscall(struct proc *p, int call, user_addr_t arg)\n'
+     '{\n'
+     '\tstruct {\n'
+     '\t\tuint64_t input_flags;\n'
+     '\t\tuser_addr_t output_flags;\n'
+     '\t} args;\n'
+     '\tuint64_t flags = S8_AMFI_DYLD_OUTPUT_ALLOW_ALL;\n'
+     '\tstatic int logged;\n'
+     '\tint error;\n'
+     '\n'
+     '\tif (call != S8_AMFI_CHECK_DYLD_POLICY) {\n'
+     '\t\treturn ENOPOLICY;\n'
+     '\t}\n'
+     '\terror = copyin(arg, &args, sizeof(args));\n'
+     '\tif (error == 0) {\n'
+     '\t\terror = copyout(&flags, args.output_flags, sizeof(flags));\n'
+     '\t}\n'
+     '\tif (logged < 4) {\n'
+     '\t\tchar name[32];\n'
+     '\t\tproc_name(proc_pid(p), name, sizeof(name));\n'
+     '\t\tprintf(PORT_NAME " AMFI: dyld policy for %s: all allowed (%d)\\n", name, error);\n'
+     '\t\tlogged++;\n'
+     '\t}\n'
+     '\treturn error;\n'
+     '}\n'
+     '\n'
+     'static const struct mac_policy_ops s8_amfi_dyld_ops = {\n'
+     '\t.mpo_policy_syscall = s8_amfi_syscall,\n'
+     '};\n'
+     '\n'
+     'static struct mac_policy_conf s8_amfi_dyld_conf = {\n'
+     '\t.mpc_name = "AMFI",\n'
+     '\t.mpc_fullname = PORT_NAME " dyld policy stand-in",\n'
+     '\t.mpc_ops = &s8_amfi_dyld_ops,\n'
+     '};\n'
+     '\n'
+     'static mac_policy_handle_t s8_amfi_dyld_handle;\n'
+     '#endif /* DREAMLTE */\n', 1),
+    ('\tprintf(PORT_NAME " Sandbox: permissive policy %s (%d)\\n",\n'
+     '\t    error ? "NOT registered" : "registered", error);\n',
+     '\tprintf(PORT_NAME " Sandbox: permissive policy %s (%d)\\n",\n'
+     '\t    error ? "NOT registered" : "registered", error);\n'
+     '#if defined(DREAMLTE)\n'
+     '\tint s8dyld = 1;\n'
+     '\tPE_parse_boot_argn("s8dyld", &s8dyld, sizeof(s8dyld));\n'
+     '\tif (s8dyld) {\n'
+     '\t\terror = mac_policy_register(&s8_amfi_dyld_conf, &s8_amfi_dyld_handle, NULL);\n'
+     '\t\tprintf(PORT_NAME " AMFI: dyld policy (DYLD_* variables, inserted libraries) %s (%d)\\n",\n'
+     '\t\t    error ? "NOT registered" : "registered", error);\n'
+     '\t}\n'
+     '#endif\n', 1),
+])

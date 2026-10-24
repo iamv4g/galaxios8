@@ -38,6 +38,9 @@
  *   9 SyncBO [handle]                      (clean + invalidate the CPU caches over the BO:
  *                                          before the GPU reads CPU writes to a cached
  *                                          mapping, and after it wrote, before the CPU reads)
+ *  10 Log, structure input = text          (each line logged as "S8 LOG <proc>: ..."; for
+ *                                          libraries inside iOS daemons whose stderr goes
+ *                                          nowhere, e.g. the CoreAnimation bridge)
  * clientMemoryForType(handle) returns the BO's memory for
  * IOConnectMapMemory64 (pass kIOMapAnywhere | kIOMapWriteCombineCache).
  */
@@ -1056,8 +1059,33 @@ IOReturn
 S8MaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
     IOExternalMethodDispatch *dispatch __unused, OSObject *target __unused, void *reference __unused)
 {
-	static const uint8_t ins[] = { 1, 2, 1, 2, 2, 1, 2, 3, 1, 1 };
-	static const uint8_t outs[] = { 1, 2, 0, 1, 0, 1, 1, 0, 3, 0 };
+	static const uint8_t ins[] = { 1, 2, 1, 2, 2, 1, 2, 3, 1, 1, 0 };
+	static const uint8_t outs[] = { 1, 2, 0, 1, 0, 1, 1, 0, 3, 0, 0 };
+	if (selector == 10) {                           /* Log: no GPU state, no lock */
+		const char *text = (const char *)args->structureInput;
+		uint32_t len = args->structureInputSize;
+		char name[32], line[256];
+		if (text == NULL || len == 0 || len > 4096) {
+			return kIOReturnBadArgument;
+		}
+		proc_selfname(name, sizeof(name));
+		for (uint32_t at = 0; at < len;) {
+			uint32_t n = 0;
+			while (at + n < len && text[at + n] != '\n' && text[at + n] != 0 && n < sizeof(line) - 1) {
+				line[n] = text[at + n];
+				n++;
+			}
+			line[n] = 0;
+			if (n > 0) {
+				IOLog("S8 LOG %s: %s\n", name, line);
+			}
+			at += n;
+			while (at < len && (text[at] == '\n' || text[at] == 0)) {
+				at++;
+			}
+		}
+		return kIOReturnSuccess;
+	}
 	if (selector >= sizeof(ins) || args->scalarInputCount != ins[selector] ||
 	    args->scalarOutputCount != outs[selector]) {
 		return kIOReturnBadArgument;

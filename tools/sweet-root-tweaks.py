@@ -240,5 +240,28 @@ def drop(root, outdir):
     save(path, plist, st.st_uid, st.st_gid, st.st_mode & 0o7777)
     print('installed /usr/local/bin/s8drop and its boot job; GPU test jobs removed')
 
+
+def ca(root, outdir):
+    """Install libs8ca.dylib (tools/dreamlte/ca/s8ca.c) and insert it into backboardd: the
+    CoreAnimation bridge to the Mali. It does nothing unless the kernel has boot-arg s8ca=1, and
+    dyld ignores DYLD_INSERT_LIBRARIES on a kernel without the AMFI dyld policy (before 0124 of
+    2026-10-24), so daily images are not affected."""
+    dst = os.path.join(root, 'usr/local/lib/libs8ca.dylib')
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.copyfile(os.path.join(outdir, 'libs8ca.dylib'), dst)
+    os.chown(dst, 0, 0)
+    os.chmod(dst, 0o755)
+    path = os.path.join(root, 'System/Library/xpc/launchd.plist')
+    st = os.stat(path)
+    plist = load(path)
+    jobs = [j for j in plist['LaunchDaemons'].values() if j.get('Label') == 'com.apple.backboardd']
+    assert len(jobs) == 1, f'{len(jobs)} backboardd jobs'
+    env = jobs[0].setdefault('EnvironmentVariables', {})
+    print('backboardd environment before:', env)
+    env['DYLD_INSERT_LIBRARIES'] = '/usr/local/lib/libs8ca.dylib'
+    save(path, plist, st.st_uid, st.st_gid, st.st_mode & 0o7777)
+    print('installed /usr/local/lib/libs8ca.dylib; backboardd gets DYLD_INSERT_LIBRARIES')
+
+
 if __name__ == '__main__':
     main()

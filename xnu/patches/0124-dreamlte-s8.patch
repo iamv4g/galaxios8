@@ -833,6 +833,80 @@ index deccec2..4c34bce 100644
  			printf("exec %s\n", p->p_name);
  #else
  			printf("Allowing spawn of iOS binary %s since it has "
+diff --git a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
+index 4fd8729..2f8ae0a 100644
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -385,6 +385,54 @@ static struct mac_policy_conf sweet_amfi_mac_conf = {
+ 
+ static mac_policy_handle_t sweet_amfi_mac_handle;
+ 
++#if defined(ARM64_BOARD_CONFIG_A5XELTE)
++#include <pexpert/pexpert.h>
++#include <pexpert/arm64/board_config.h>
++#endif
++#if defined(DREAMLTE)
++#define S8_AMFI_CHECK_DYLD_POLICY       0x5a
++#define S8_AMFI_DYLD_OUTPUT_ALLOW_ALL   0xffULL
++
++static int
++s8_amfi_syscall(struct proc *p, int call, user_addr_t arg)
++{
++	struct {
++		uint64_t input_flags;
++		user_addr_t output_flags;
++	} args;
++	uint64_t flags = S8_AMFI_DYLD_OUTPUT_ALLOW_ALL;
++	static int logged;
++	int error;
++
++	if (call != S8_AMFI_CHECK_DYLD_POLICY) {
++		return ENOPOLICY;
++	}
++	error = copyin(arg, &args, sizeof(args));
++	if (error == 0) {
++		error = copyout(&flags, args.output_flags, sizeof(flags));
++	}
++	if (logged < 4) {
++		char name[32];
++		proc_name(proc_pid(p), name, sizeof(name));
++		printf(PORT_NAME " AMFI: dyld policy for %s: all allowed (%d)\n", name, error);
++		logged++;
++	}
++	return error;
++}
++
++static const struct mac_policy_ops s8_amfi_dyld_ops = {
++	.mpo_policy_syscall = s8_amfi_syscall,
++};
++
++static struct mac_policy_conf s8_amfi_dyld_conf = {
++	.mpc_name = "AMFI",
++	.mpc_fullname = PORT_NAME " dyld policy stand-in",
++	.mpc_ops = &s8_amfi_dyld_ops,
++};
++
++static mac_policy_handle_t s8_amfi_dyld_handle;
++#endif /* DREAMLTE */
++
+ /* Called from bsd_init once MAC policies can register, before any exec. */
+ void sweet_amfi_policy_register(void);
+ 
+@@ -397,5 +445,14 @@ sweet_amfi_policy_register(void)
+ 	error = mac_policy_register(&sweet_sandbox_mac_conf, &sweet_sandbox_mac_handle, NULL);
+ 	printf(PORT_NAME " Sandbox: permissive policy %s (%d)\n",
+ 	    error ? "NOT registered" : "registered", error);
++#if defined(DREAMLTE)
++	int s8dyld = 1;
++	PE_parse_boot_argn("s8dyld", &s8dyld, sizeof(s8dyld));
++	if (s8dyld) {
++		error = mac_policy_register(&s8_amfi_dyld_conf, &s8_amfi_dyld_handle, NULL);
++		printf(PORT_NAME " AMFI: dyld policy (DYLD_* variables, inserted libraries) %s (%d)\n",
++		    error ? "NOT registered" : "registered", error);
++	}
++#endif
+ }
+ #endif /* SWEET || A5XELTE */
 diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.cpp
 index 7a32a23..4e20b25 100644
 --- a/iokit/Kernel/IOPlatformExpert.cpp
@@ -876,10 +950,10 @@ index 7a32a23..4e20b25 100644
  	*usecs = nsecs / NSEC_PER_USEC;
 diff --git a/iokit/Kernel/arm/S8Mali.cpp b/iokit/Kernel/arm/S8Mali.cpp
 new file mode 100644
-index 0000000..d910a85
+index 0000000..5983d18
 --- /dev/null
 +++ b/iokit/Kernel/arm/S8Mali.cpp
-@@ -0,0 +1,1162 @@
+@@ -0,0 +1,1190 @@
 +/*
 + * S8Mali: kernel driver for the Galaxy S8's Mali-G71 MP20 (Exynos 8895,
 + * DT mali@13900000, GPU_ID 0x60a00001 = r0p0), written for this port.
@@ -920,6 +994,9 @@ index 0000000..d910a85
 + *   9 SyncBO [handle]                      (clean + invalidate the CPU caches over the BO:
 + *                                          before the GPU reads CPU writes to a cached
 + *                                          mapping, and after it wrote, before the CPU reads)
++ *  10 Log, structure input = text          (each line logged as "S8 LOG <proc>: ..."; for
++ *                                          libraries inside iOS daemons whose stderr goes
++ *                                          nowhere, e.g. the CoreAnimation bridge)
 + * clientMemoryForType(handle) returns the BO's memory for
 + * IOConnectMapMemory64 (pass kIOMapAnywhere | kIOMapWriteCombineCache).
 + */
@@ -1938,8 +2015,33 @@ index 0000000..d910a85
 +S8MaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
 +    IOExternalMethodDispatch *dispatch __unused, OSObject *target __unused, void *reference __unused)
 +{
-+	static const uint8_t ins[] = { 1, 2, 1, 2, 2, 1, 2, 3, 1, 1 };
-+	static const uint8_t outs[] = { 1, 2, 0, 1, 0, 1, 1, 0, 3, 0 };
++	static const uint8_t ins[] = { 1, 2, 1, 2, 2, 1, 2, 3, 1, 1, 0 };
++	static const uint8_t outs[] = { 1, 2, 0, 1, 0, 1, 1, 0, 3, 0, 0 };
++	if (selector == 10) {                           /* Log: no GPU state, no lock */
++		const char *text = (const char *)args->structureInput;
++		uint32_t len = args->structureInputSize;
++		char name[32], line[256];
++		if (text == NULL || len == 0 || len > 4096) {
++			return kIOReturnBadArgument;
++		}
++		proc_selfname(name, sizeof(name));
++		for (uint32_t at = 0; at < len;) {
++			uint32_t n = 0;
++			while (at + n < len && text[at + n] != '\n' && text[at + n] != 0 && n < sizeof(line) - 1) {
++				line[n] = text[at + n];
++				n++;
++			}
++			line[n] = 0;
++			if (n > 0) {
++				IOLog("S8 LOG %s: %s\n", name, line);
++			}
++			at += n;
++			while (at < len && (text[at] == '\n' || text[at] == 0)) {
++				at++;
++			}
++		}
++		return kIOReturnSuccess;
++	}
 +	if (selector >= sizeof(ins) || args->scalarInputCount != ins[selector] ||
 +	    args->scalarOutputCount != outs[selector]) {
 +		return kIOReturnBadArgument;

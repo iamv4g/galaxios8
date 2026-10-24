@@ -13,6 +13,9 @@
   makes the surface's memory a texture (and, attached to an FBO, a render target), as
   HackiOS's freedreno-darwin.patch (MIT) does for freedreno. The surface comes in where Linux
   passes a dma-buf fd: s8drm's drmPrimeFDToHandle imports it (S8Mali selector 8).
+- OSMesa: OSMESA_PROFILE = OSMESA_ES_PROFILE (0x38) gives an OpenGL ES 2/3 context, for the
+  EAGLContext bridge in backboardd (tools/dreamlte/ca); the same edit as HackiOS's
+  osmesa-es-profile.patch (MIT).
 Every replacement asserts its match count, as tools/dreamlte/apply-dreamlte.py does.
 """
 import sys
@@ -201,4 +204,21 @@ edit('src/gallium/targets/osmesa/osmesa_target.c', [(
     "struct pipe_screen *\nosmesa_create_screen(void);\n", 1),
     ('#include "util/xmlconfig.h"\n',
      '#include "util/xmlconfig.h"\n#include "frontend/winsys_handle.h"\n#include "pipe/p_screen.h"\n#include "pipe/p_state.h"\n#include "drm-uapi/drm_fourcc.h"\n', 1),
+])
+
+edit('include/GL/osmesa.h', [(
+    "#define OSMESA_CONTEXT_MINOR_VERSION 0x37\n",
+    "#define OSMESA_CONTEXT_MINOR_VERSION 0x37\n"
+    "#define OSMESA_ES_PROFILE            0x38  /* an OpenGL ES 2 or 3 context, by the version asked for */\n", 1)])
+
+edit('src/gallium/frontends/osmesa/osmesa.c', [
+    ("         if (profile != OSMESA_CORE_PROFILE &&\n"
+     "             profile != OSMESA_COMPAT_PROFILE)\n",
+     "         if (profile != OSMESA_CORE_PROFILE &&\n"
+     "             profile != OSMESA_COMPAT_PROFILE &&\n"
+     "             profile != OSMESA_ES_PROFILE)\n", 1),
+    ("   attribs.profile = (profile == OSMESA_CORE_PROFILE)\n"
+     "      ? API_OPENGL_CORE : API_OPENGL_COMPAT;\n",
+     "   attribs.profile = (profile == OSMESA_ES_PROFILE) ? API_OPENGLES2 :\n"
+     "      (profile == OSMESA_CORE_PROFILE) ? API_OPENGL_CORE : API_OPENGL_COMPAT;\n", 1),
 ])

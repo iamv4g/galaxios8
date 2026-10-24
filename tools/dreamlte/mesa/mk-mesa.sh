@@ -6,7 +6,8 @@
 #   s8drm/           the libdrm stand-in (DRM requests -> S8Mali user client)
 #   patch-mesa.py    the edits to Mesa's tree (meson, mmap, OSMesa screen)
 #
-#   tools/dreamlte/mesa/mk-mesa.sh      -> research/mesa-ios/out/libOSMesa.8.dylib
+#   tools/dreamlte/mesa/mk-mesa.sh      -> research/mesa-ios/out/libOSMesa.8.dylib (+ drop/, ca/,
+#                                          exported-gl.txt, gl.xml)
 #
 # Needs: Xcode, Homebrew ninja and bison (keg-only, >= 3), python3 (meson and mako go into a
 # venv in research/mesa-ios).
@@ -75,4 +76,12 @@ mkdir -p out/drop
 cp out/libOSMesa.8.dylib out/drop/libOSMesa.8.dylib
 install_name_tool -id /private/var/tmp/s8drop/libOSMesa.8.dylib out/drop/libOSMesa.8.dylib  # dyld refuses @ paths here (c36)
 codesign -f -s - out/drop/libOSMesa.8.dylib
+# ... and for the CoreAnimation bridge in backboardd (tools/dreamlte/ca), which unpacks it there
+mkdir -p out/ca
+cp out/libOSMesa.8.dylib out/ca/libOSMesa.8.dylib
+install_name_tool -id /private/var/tmp/s8ca/libOSMesa.8.dylib out/ca/libOSMesa.8.dylib
+codesign -f -s - out/ca/libOSMesa.8.dylib
+# what tools/dreamlte/ca/mkeagl.py needs: the gl* functions the library exports, their prototypes
+nm -gU out/libOSMesa.8.dylib | awk '$3 ~ /^_gl/ { print substr($3, 2) }' > out/exported-gl.txt
+cp "$src/src/mapi/glapi/registry/gl.xml" out/gl.xml
 echo "mk-mesa.sh: $B/out/libOSMesa.8.dylib, out/drop/libOSMesa.8.dylib ($(stat -f %z out/libOSMesa.8.dylib) bytes)"
