@@ -1095,7 +1095,9 @@ QuartzCore 16.7.16 `EAGLServer::renderer()` has the same order (Metal, then
   (Favorites) drawn right on the Mali. Photos crashed at each launch (the old crash above).
 - 2026-10-24 17:09: **BOOT = `s8-gpu-c-boot.img`** (SHA-256 0d45b8d3...bfc6, read back; kernel
   c52, gpu-b's args), drop zone = drop-ca16 (ca-libOSMesa with the fix, ca-libs8gl, ca-ready;
-  nothing runs at boot). Rebooted into iOS for the user's third hands-on test. Result: pending.
+  nothing runs at boot). Rebooted into iOS for the user's third hands-on test.
+- **gpu-c hands-on (user's words):** "much better, it no longer happens": no more freezes or
+  backboardd restarts (no log pulled for this session).
 
 ### GPU: next steps (plan, not started)
 
