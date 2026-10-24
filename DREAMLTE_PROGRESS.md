@@ -1180,10 +1180,17 @@ stop here") and asked for the S8 back in its pre-iOS state. Done from TWRP, with
   the iOS root on 2026-10-22, with the user's consent, and was never backed up). Android starts
   like after a factory reset.
 - Untouched throughout: system (the Note 9 port ROM), EFS, recovery (TWRP), modem, bootloaders.
-- Kept on the Mac (git-ignored): `backup/`, `research/` (IPSW, iOS root images, Mesa, xnu tree).
-- Last iOS state for whoever picks this up: kernel c70 (`s8-gpu-e-boot.img`), drop-ca21, the
-  quiet root (`research/s8root/live.img` + the 7 edited chunks in `live.img.edited`).
-  Rebooted into Android at 21:20; whether it reaches the setup screen: user to confirm.
+- Rebooted into Android at 21:20: the user confirmed it reached Android.
+- **Mac cleaned up at the user's request (21:35):** deleted the git-ignored `research/` (IPSW,
+  dyld cache, iOS root images, xnu-local tree, Mesa build, HackiOS copy), `logs/`,
+  `shim/dreamlte/out/`, `shim/dreamlte/firmware/`, `xnu/out*`; the Lima VM `s8`, `~/.lima` and
+  Lima's cache; the Homebrew packages installed for this work (lima, ipsw + the blacktop tap,
+  gum, jq, ninja, bison, cmake, aarch64-elf-gcc/binutils, coreutils, gawk and their own deps
+  oniguruma, isl, libmpc, mpfr, gmp; lz4/zstd predate it and stay) and their download cache.
+  Kept: `backup/` (stock BOOT, EFS with the IMEI, RECOVERY) and everything in git. The KDK in
+  `/Library/Developer/KDKs` needs the user's sudo. Resuming means rebuilding all of it from the
+  scripts (docs/mac-build.md, mk-mesa.sh, build-xnu-local.sh, mkiosroot.sh) and the last iOS
+  state (kernel c70 / gpu-e, quiet root) only exists as these scripts and patches.
 
 ### GPU: next steps (plan, not started)
 
