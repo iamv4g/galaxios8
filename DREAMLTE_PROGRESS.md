@@ -1165,6 +1165,26 @@ The user: the phone gets hot (gpu-b/gpu-c; in iOS `S8 DVFS` 63-76 C at fixed 170
   user.
 - Also seen, older and not heat: the Preferences crash (CoreImage EAGL) and Photos abort.
 
+### Test phone restored to Android, testing stopped (2026-10-24 21:20)
+
+The user ended the experiment ("after many deployments and the limits we hit, testing should
+stop here") and asked for the S8 back in its pre-iOS state. Done from TWRP, with their go-ahead:
+
+- BOOT `sda7` = `backup/BOOT.img` (the stock image saved 2026-10-21), read back: SHA-256
+  `15b66875...ee7bc`, as recorded at the backup.
+- USERDATA `sda24`: the last 20 KiB (TWRP fstab `encryptable=footer;length=-20480`; our log ring
+  lived there) zeroed, then `mke2fs -t ext4 -b 4096 /dev/block/sda24 14369787` (TWRP's mke2fs
+  1.43.3 defaults, no metadata_csum); e2fsck clean, mounts in TWRP (53.7 GiB, empty).
+  `twrp format data` does not exist in this TWRP's script language.
+- Not restorable: the Android user data from before the iOS install (USERDATA was overwritten by
+  the iOS root on 2026-10-22, with the user's consent, and was never backed up). Android starts
+  like after a factory reset.
+- Untouched throughout: system (the Note 9 port ROM), EFS, recovery (TWRP), modem, bootloaders.
+- Kept on the Mac (git-ignored): `backup/`, `research/` (IPSW, iOS root images, Mesa, xnu tree).
+- Last iOS state for whoever picks this up: kernel c70 (`s8-gpu-e-boot.img`), drop-ca21, the
+  quiet root (`research/s8root/live.img` + the 7 edited chunks in `live.img.edited`).
+  Rebooted into Android at 21:20; whether it reaches the setup screen: user to confirm.
+
 ### GPU: next steps (plan, not started)
 
 0. CoreAnimation on the Mali draws the lock screen, home screen and App Library right (c61).
