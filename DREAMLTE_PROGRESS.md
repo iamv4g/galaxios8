@@ -770,9 +770,6 @@ the tree as `iokit/Kernel/arm/S8Mali.cpp` by apply-dreamlte.py with a
   stand-in + Darwin `pan_kmod` for Mesa Panfrost (G71 is in Mesa's model
   list, `pan_props.c`).
 
-Status (earlier session): writing the driver source was stopped three
-times by the assistant's safety classifier; finished on 2026-10-24 (below).
-
 ### GPU milestone 2: S8Mali runs jobs inside XNU (c31-c32, 2026-10-24)
 
 `tools/dreamlte/dreamlte_mali.cpp` -> `iokit/Kernel/arm/S8Mali.cpp` (0124,
