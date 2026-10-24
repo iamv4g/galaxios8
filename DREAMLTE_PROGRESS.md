@@ -1093,7 +1093,7 @@ QuartzCore 16.7.16 `EAGLServer::renderer()` has the same order (Metal, then
   reached 64 (no `0x4c` report); 133 IOSurface textures made (93 full screen) where gpu-b's
   second backboardd crashed after ~71. Shots: Settings, App Store ("connect to Wi-Fi") and Safari
   (Favorites) drawn right on the Mali. Photos crashed at each launch (the old crash above).
-- 2026-10-24 17:15: **BOOT = `s8-gpu-c-boot.img`** (SHA-256 0d45b8d3...bfc6, read back; kernel
+- 2026-10-24 17:09: **BOOT = `s8-gpu-c-boot.img`** (SHA-256 0d45b8d3...bfc6, read back; kernel
   c52, gpu-b's args), drop zone = drop-ca16 (ca-libOSMesa with the fix, ca-libs8gl, ca-ready;
   nothing runs at boot). Rebooted into iOS for the user's third hands-on test. Result: pending.
 
