@@ -994,11 +994,35 @@ QuartzCore 16.7.16 `EAGLServer::renderer()` has the same order (Metal, then
   `IOSurface::wrap_buffer` <- `GLESContext::retain_image` (frames symbolized with `ipsw dyld
   a2s`). Cause: IOSurface selector 6 is `IOSurfaceClientWrapClientImage`; SweetSurface's default
   case answered success with an all-zero lock result. Now refused (CoreAnimation then uploads the
-  image as a texture). Kernel building (c50).
+  image as a texture).
+- **c50 (kernel with the refusal): CoreAnimation draws the iOS UI on the Mali.** One backboardd
+  for the whole run (no crash, no restart), frames logged by the bridge: 15-47 ms each (about
+  10 ms of it waiting for the GPU; frame 1 81 ms), after 30 frames 0 GL errors, 23 shaders,
+  20 programs, framebuffer surfaces BGRA 1125x2436 handed to the display (`SWEET FB: swap`).
+  Only ~60-80 frames in 300 s: CoreAnimation draws only on change (lock screen, nobody
+  touching). No GPU fault or reset, 458 execs, 61 C (max 74).
+- **c51 (same image + `tools/dreamlte/s8shot.c`, screenshots without a person):** s8shot (run
+  by s8drop) read the window server's framebuffer IOSurfaces at 120/200/270 s and wrote them raw
+  to USERDATA at 21 GiB; `tools/dreamlte/pull-shot.py c51` made PNGs (logs/, git-ignored).
+  **They show the iOS lock screen drawn by the GPU, correct**: red gradient wallpaper, date,
+  clock advancing 9:35 -> 9:36 between shots, charging battery icon, camera button, home bar.
+  Not yet seen on the panel itself by a person, and no touch/unlock/home screen/apps tried with
+  the GPU renderer (needs someone at the phone).
+- After c51: BOOT back to `s8-daily-e-boot.img` (SHA-256 1cb8b2b6...ef5d, read back), drop zone
+  = drop-ca4 (ca-libOSMesa, ca-libs8gl, ca-ready; nothing runs at boot). For a hands-on test:
+  `shim/dreamlte/out/s8-gpu-a-boot.img` (SHA-256 60c55419...91df; kernel c50, daily-e args +
+  `s8ca=1`, new ADT with sRGB gamut, no autoreset, no watchdog): built, not written.
 
 ### GPU: next steps (plan, not started)
 
-1. CoreAnimation on the Mali: HackiOS's route (research/hackios
+0. CoreAnimation on the Mali works on the lock screen (c50/c51, above). Next: someone at the
+   phone boots s8-gpu-a (touch, unlock, home screen, Control Center, an app: smoothness against
+   daily-e, glitches); if good it becomes the daily image. Faster frames: the framebuffer surfaces
+   are cached memory, so every submit naming them cleans and invalidates 11 MB twice (~10 ms of
+   each frame's "waiting"); a write-combined framebuffer surface (SweetSurface cache mode) or
+   flushing only what a frame wrote. Zero-copy layer contents: implement IOSurface
+   WrapClientImage (selector 6) instead of refusing it.
+1. (done up to the lock screen, see c46-c51) CoreAnimation on the Mali: HackiOS's route (research/hackios
    userland/src/inject.c + eagl.c, MIT): DYLD_INSERT_LIBRARIES into
    backboardd (needs the AMFI stand-in to allow it), make CA's
    EAGLServer::renderer() pick its OpenGL ES backend, and back EAGLContext
