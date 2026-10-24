@@ -1012,6 +1012,10 @@ QuartzCore 16.7.16 `EAGLServer::renderer()` has the same order (Metal, then
   = drop-ca4 (ca-libOSMesa, ca-libs8gl, ca-ready; nothing runs at boot). For a hands-on test:
   `shim/dreamlte/out/s8-gpu-a-boot.img` (SHA-256 60c55419...91df; kernel c50, daily-e args +
   `s8ca=1`, new ADT with sRGB gamut, no autoreset, no watchdog): built, not written.
+- 2026-10-24 12:38: at the user's request **BOOT = `s8-gpu-a-boot.img`** (60c55419...91df, read
+  back), rebooted into iOS for a hands-on test by the user. It does not return to TWRP by itself:
+  getting back needs the user (hold Power + Volume Down to restart, then Volume Up + Bixby + Power
+  for recovery). Result of the hands-on test: pending.
 
 ### GPU: next steps (plan, not started)
 
