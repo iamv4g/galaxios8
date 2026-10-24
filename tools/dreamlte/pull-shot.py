@@ -2,13 +2,14 @@
 """Read the screenshots tools/dreamlte/s8shot.c wrote to USERDATA (21 GiB + k * 16 MiB) from the
 Galaxy S8 in TWRP and save them as PNG in logs/ (shot-NAME-K.png). Reads only, the S8 only.
 
-  tools/dreamlte/pull-shot.py NAME
+  ANDROID_SERIAL=<serial> tools/dreamlte/pull-shot.py NAME
 """
 import os, struct, subprocess, sys, zlib
 
-SERIAL = 'ce081718edd2030d02'
+if not os.environ.get('ANDROID_SERIAL'):
+    sys.exit('set ANDROID_SERIAL to the S8 serial (adb devices -l)')
 name = sys.argv[1]
-env = dict(os.environ, ANDROID_SERIAL=SERIAL)
+env = dict(os.environ)
 adb = lambda *a, **k: subprocess.run(['adb', *a], env=env, check=True, capture_output=True, **k).stdout
 assert adb('shell', 'getprop', 'ro.product.device').strip() == b'dreamlte'
 logs = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../logs')

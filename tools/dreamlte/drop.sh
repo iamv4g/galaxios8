@@ -2,10 +2,10 @@
 # Write a drop-zone image (tools/dreamlte/mkdrop.py) to USERDATA at 20 GiB, after the 16 GiB
 # iOS root and far from the kernel log ring at the end, and verify it. TWRP only, the S8 only.
 #
-#   tools/dreamlte/drop.sh DROP.img
+#   ANDROID_SERIAL=<serial> tools/dreamlte/drop.sh DROP.img
 set -euo pipefail
-SERIAL=ce081718edd2030d02
-export ANDROID_SERIAL=$SERIAL
+: "${ANDROID_SERIAL:?set ANDROID_SERIAL to the S8 serial (adb devices -l)}"
+export ANDROID_SERIAL
 img=${1:?drop image}
 size=$(wc -c < "$img" | tr -d ' ')
 (( size <= 268435456 && size % 4096 == 0 )) || { echo "drop image must be 4 KiB aligned, at most 256 MiB" >&2; exit 2; }

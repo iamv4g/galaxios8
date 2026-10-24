@@ -5,25 +5,24 @@
 # or a kernel booted with s8autoreset=N), then pull the pmsg zone and the
 # kernel log ring into logs/.
 #
-#   tools/dreamlte/cycle.sh BOOT_IMAGE NAME [TIMEOUT_SECONDS]
+#   ANDROID_SERIAL=<serial> tools/dreamlte/cycle.sh BOOT_IMAGE NAME [TIMEOUT_SECONDS]
 #
-# Safety: only the serial below, only when it reports dreamlte and is in
+# Safety: only the phone named by ANDROID_SERIAL, only when it reports dreamlte and is in
 # recovery, only BOOT (sda7), and the write is verified byte for byte. If the
 # phone does not come back within the timeout (default 600 s) the script
 # stops and says so; it never retries a write.
 set -euo pipefail
 
-SERIAL=ce081718edd2030d02
+: "${ANDROID_SERIAL:?set ANDROID_SERIAL to the S8 serial (adb devices -l)}"
 img=${1:?BOOT image}
 name=${2:?name for the logs, e.g. k2b}
 timeout=${3:-600}
 repo=$(cd "$(dirname "$0")/../.." && pwd)
-export ANDROID_SERIAL=$SERIAL
 
 [[ -f $img ]] || { echo "no such image: $img" >&2; exit 2; }
 size=$(wc -c < "$img" | tr -d ' ')
 (( size <= 41943040 )) || { echo "image larger than BOOT (40 MiB)" >&2; exit 2; }
-[[ $(adb get-state 2>/dev/null | tr -d '\r') == recovery ]] || { echo "phone $SERIAL not in recovery" >&2; exit 1; }
+[[ $(adb get-state 2>/dev/null | tr -d '\r') == recovery ]] || { echo "phone $ANDROID_SERIAL not in recovery" >&2; exit 1; }
 [[ $(adb shell getprop ro.product.device | tr -d '\r') == dreamlte ]] || { echo "phone is not a dreamlte" >&2; exit 1; }
 [[ $(adb shell blockdev --getsize64 /dev/block/sda7 | tr -d '\r') == 41943040 ]] || { echo "sda7 is not the 40 MiB BOOT" >&2; exit 1; }
 
