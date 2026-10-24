@@ -1187,8 +1187,10 @@ stop here") and asked for the S8 back in its pre-iOS state. Done from TWRP, with
   Lima's cache; the Homebrew packages installed for this work (lima, ipsw + the blacktop tap,
   gum, jq, ninja, bison, cmake, aarch64-elf-gcc/binutils, coreutils, gawk and their own deps
   oniguruma, isl, libmpc, mpfr, gmp; lz4/zstd predate it and stay) and their download cache.
-  Kept: `backup/` (stock BOOT, EFS with the IMEI, RECOVERY) and everything in git. The KDK in
-  `/Library/Developer/KDKs` needs the user's sudo. Resuming means rebuilding all of it from the
+  Kept: everything in git. The user then removed the KDK themselves (its receipt stays in the
+  SIP-protected `/Library/Apple/System/Library/Receipts`) and asked for `backup/` (stock BOOT,
+  EFS with the IMEI, RECOVERY of the S8) to be deleted too: done, so **no copy of the S8's EFS
+  exists on the Mac any more**. Resuming means rebuilding all of it from the
   scripts (docs/mac-build.md, mk-mesa.sh, build-xnu-local.sh, mkiosroot.sh) and the last iOS
   state (kernel c70 / gpu-e, quiet root) only exists as these scripts and patches.
 
