@@ -1061,6 +1061,8 @@ QuartzCore 16.7.16 `EAGLServer::renderer()` has the same order (Metal, then
 - State after c61: drop zone = drop-ca14 (ca-libOSMesa, ca-libs8gl with the fix and s8swipe,
   ca-ready; nothing runs at boot). Hands-on image `shim/dreamlte/out/s8-gpu-b-boot.img` (SHA-256
   5eeacd62...4908; kernel c52, daily-e args + `s8ca=1`, no autoreset).
+- 2026-10-24 14:31: **BOOT = `s8-gpu-b-boot.img`** (read back), rebooted into iOS for the user's
+  second hands-on test. Does not return to TWRP by itself. Result: pending.
 
 ### GPU: next steps (plan, not started)
 
