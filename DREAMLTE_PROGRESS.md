@@ -1160,7 +1160,7 @@ The user: the phone gets hot (gpu-b/gpu-c; in iOS `S8 DVFS` 63-76 C at fixed 170
   0x75 munmap of an address not mapped by s8drm.
 - **c71** (c70 repeated with that Mesa): ran to the end, no crash, none of those reports; panel copy
   9.0-9.9 ms, TMU 46-55 C.
-- 2026-10-24 20:55: **BOOT = `s8-gpu-e-boot.img`** (SHA-256 4d6ef2fc...7e9f, read back; kernel c70,
+- 2026-10-24 20:53: **BOOT = `s8-gpu-e-boot.img`** (SHA-256 4d6ef2fc...7e9f, read back; kernel c70,
   gpu-d's args), drop zone = drop-ca21 (Mesa with the mapping reports). Rebooted into iOS for the
   user.
 - Also seen, older and not heat: the Preferences crash (CoreImage EAGL) and Photos abort.
