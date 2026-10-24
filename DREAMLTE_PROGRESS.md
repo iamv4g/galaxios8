@@ -1015,13 +1015,58 @@ QuartzCore 16.7.16 `EAGLServer::renderer()` has the same order (Metal, then
 - 2026-10-24 12:38: at the user's request **BOOT = `s8-gpu-a-boot.img`** (60c55419...91df, read
   back), rebooted into iOS for a hands-on test by the user. It does not return to TWRP by itself:
   getting back needs the user (hold Power + Volume Down to restart, then Volume Up + Bixby + Power
-  for recovery). Result of the hands-on test: pending.
+  for recovery). **Hands-on result (user's video, gpu-a):** "much smoother than before", but the
+  UI broken: home screen icons missing (labels only), App Library folders blank white squares,
+  the dock and the Search field flat grey rectangles, no rounded corners or shadows. Settings
+  drew mostly right. The user brought the phone back to TWRP (log logs/sweetlog-gpu-a1).
+
+### CoreAnimation on the Mali: the picture made right (c52-c61, 2026-10-24)
+
+- **Pictures CoreAnimation wraps (cause of the missing icons):** with WrapClientImage refused,
+  CoreAnimation's GL renderer makes its pictures (icons, corner masks, shadows, layer contents)
+  with `IOSurfaceCreate` + `IOSurfaceAddress` (its own memory; no pixel format, "keys 8" in the
+  log). SweetSurface ignored the key and gave fresh zeroed memory, so all of those drew as nothing.
+  0124 now wraps the client's memory (wired while the surface lives; the creator sees it at its own
+  address, others through a mapping; as HackiOS's MiniIOSurface). Kernel **c52**.
+- **c52** (lock screen only): unchanged picture; the lock screen makes almost no such surfaces.
+  The c51 shots were also not fully right: the camera button was a dark square, not a circle.
+- **Unattended screens past the lock screen:** `tools/dreamlte/ca/s8swipe.c` (in libs8gl, so no
+  root edit): boot-arg `s8swipe=100,150l,210d` swipes at those seconds through a touch screen
+  service of ours in backboardd (HackiOS's inject.c, cut down). s8shot takes `s8shot=T,...`.
+  eagl.c: `s8ca=2` loads the bridge but leaves EAGLContext alone (software renderer) for
+  comparison pictures.
+- **c53** (c52 + `s8swipe=100`): unlocked to the home screen; **icons and dock icons drawn**.
+  **c54** (`s8ca=2`, software renderer): the home screen wallpaper is black there too (not a GPU
+  bug). Left: the dock and the Search field drawn as their whole rectangles, grey.
+- **c55/c56** (gltrace_place on the Search field, plus the vertex attributes of each listed draw):
+  the field is one draw of 54 triangles, program 70, whose shape is CoreAnimation's
+  `supercircleImage(texcoord1)` with `w = max(fwidth(d), 1e-4)`; texcoord1 arrives right (the
+  first corner -1,-1). Outside the shape it came out about half covered: fwidth far too big.
+  (The `glDrawElements: error 0x501` lines only appear with tracing on: the trace's own queries.)
+- **c57-c59, `tools/dreamlte/s8dfdx.c` (derivatives measured on the G71):** `dFdx(gl_FragCoord.x)`
+  = 0, `fwidth(uv)` = 2|uv|: the other lane of the quad reads as zero. A trilinear texture over
+  256 x 256 pixels picks the right level (the texture unit's derivatives and the 2x2 quads are
+  fine). Mesa on the G71 (quirk `BIFROST_LIMITED_CLPER`) reads the other lane with CLPER_OLD; a
+  Mesa built to try its operands swapped, its lane number x4 and x256 gave the same zeros, and the
+  full (v7) CLPER encoding faulted the job (2 GPU faults, reset, recovered). Not kept in Mesa.
+- **Fix (eagl.c, `fwidth_lowering`):** on the G71, `fwidth()` in CoreAnimation's fragment shaders
+  is the texture unit's: a 16384 x 1 texture whose mipmap level i holds i, on unit 15; the level it
+  picks for (v, 0.5) gives max(|dv/dx|, |dv/dy|). CoreAnimation's GL shaders use derivatives only
+  as fwidth (shape edges). `glfwidth=1` keeps Mesa's.
+- **c60** (fix): the dock and the Search field rounded, with clean edges. **c61**
+  (`s8swipe=100,150l,210d s8shot=90,130,190,260`): lock screen with a round camera button; home
+  screen right; **App Library: rounded folder platters with their icons**, the blurred dock behind;
+  the swipe down from the top left brings the Cover Sheet. 0 GL errors, no GPU faults.
+  (Physical panel and touch not seen by a person for c52-c61.)
+- State after c61: drop zone = drop-ca14 (ca-libOSMesa, ca-libs8gl with the fix and s8swipe,
+  ca-ready; nothing runs at boot). Hands-on image `shim/dreamlte/out/s8-gpu-b-boot.img` (SHA-256
+  5eeacd62...4908; kernel c52, daily-e args + `s8ca=1`, no autoreset).
 
 ### GPU: next steps (plan, not started)
 
-0. CoreAnimation on the Mali works on the lock screen (c50/c51, above). Next: someone at the
-   phone boots s8-gpu-a (touch, unlock, home screen, Control Center, an app: smoothness against
-   daily-e, glitches); if good it becomes the daily image. Faster frames: the framebuffer surfaces
+0. CoreAnimation on the Mali draws the lock screen, home screen and App Library right (c61).
+   Next: the user tries s8-gpu-b by hand (apps, Control Center, scrolling); if good it becomes
+   the daily image. Faster frames: the framebuffer surfaces
    are cached memory, so every submit naming them cleans and invalidates 11 MB twice (~10 ms of
    each frame's "waiting"); a write-combined framebuffer surface (SweetSurface cache mode) or
    flushing only what a frame wrote. Zero-copy layer contents: implement IOSurface

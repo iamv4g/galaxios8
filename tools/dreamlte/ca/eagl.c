@@ -1571,6 +1571,50 @@ trace_placed_draw(struct eagl *e, GLenum mode, GLenum type, const void *indices,
 	    (double)high[0], (double)high[1], e->program, textures, (double)colour[0], (double)colour[1], (double)colour[2],
 	    (double)colour[3], (double)where[0], (double)where[1], glIsEnabled(GL_BLEND) ? "on" : "off", blend[0], blend[1],
 	    glIsEnabled(GL_SCISSOR_TEST) ? "on" : "off", scissor[0], scissor[1], scissor[2], scissor[3]);
+	/*
+	 * galaxios8: and what the vertex arrays held for the first corner, with where the program
+	 * looks for each of CoreAnimation's attributes (the Search field's rounded shape comes from
+	 * vertex_texcoord1: drawn as a full rectangle on the S8, as if that were all zero).
+	 */
+	{
+		static const char *const names[] = { "vertex_position", "vertex_color", "vertex_texcoord0", "vertex_texcoord1",
+		    "vertex_normal" };
+		char line[400] = "";
+		size_t at = 0;
+		unsigned vertex = indices == NULL ? (unsigned)first : type == GL_UNSIGNED_SHORT ? ((const uint16_t *)indices)[0] :
+		    type == GL_UNSIGNED_BYTE ? ((const uint8_t *)indices)[0] : ((const uint32_t *)indices)[0];
+
+		for (unsigned n = 0; n < 5; n++) {
+			at += (size_t)snprintf(line + at, sizeof(line) - at, " %s@%d", names[n] + 7,
+			    glGetAttribLocation(e->program, names[n]));
+		}
+		for (unsigned a = 0; a < 6 && at < sizeof(line) - 80; a++) {
+			GLint enabled = 0;
+			const uint8_t *p = e->arrays[a].pointer;
+
+			glGetVertexAttribiv(a, 0x8622, &enabled);       /* GL_VERTEX_ATTRIB_ARRAY_ENABLED */
+			at += (size_t)snprintf(line + at, sizeof(line) - at, "; [%u] %s %d x %#x /%d", a, enabled ? "on" : "off",
+			    e->arrays[a].size, e->arrays[a].type, e->arrays[a].stride);
+			if (enabled && p != NULL && e->arrays[a].size >= 2) {
+				p += (size_t)vertex * (size_t)e->arrays[a].stride;
+				if (e->arrays[a].type == GL_FLOAT) {
+					float v[2];
+
+					memcpy(v, p, sizeof(v));
+					at += (size_t)snprintf(line + at, sizeof(line) - at, " %g %g", (double)v[0], (double)v[1]);
+				} else if (e->arrays[a].type == GL_HALF_FLOAT || e->arrays[a].type == 0x8d61) {
+					uint16_t v[2];
+
+					memcpy(v, p, sizeof(v));
+					at += (size_t)snprintf(line + at, sizeof(line) - at, " %g %g", (double)half_float(v[0]),
+					    (double)half_float(v[1]));
+				} else {
+					at += (size_t)snprintf(line + at, sizeof(line) - at, " %u %u", p[0], p[1]);
+				}
+			}
+		}
+		say("gl-at:     attributes:%s\n", line);
+	}
 }
 
 /* gltrace_look: the pixel a listed draw has left in the middle of itself (the matrix is CoreAnimation's, the last it gave). */
@@ -3679,6 +3723,57 @@ static const char vertex_start[] =
     "#define texture2DLod textureLod\n"
     "#line 1\n";
 
+/*
+ * galaxios8: fwidth() on the Mali-G71. Mesa's Panfrost reads another lane of the 2x2 quad with
+ * CLPER, and on the G71 (r0p0, Bifrost v6, quirk BIFROST_LIMITED_CLPER) that lane's value comes
+ * back zero, whichever way it is asked for (tools/dreamlte/s8dfdx.c, c57/c59): dFdx(v) is 0 and
+ * fwidth(v) is 2|v|. CoreAnimation edges its rounded shapes with fwidth() (supercircleImage,
+ * squareImage: w = max(fwidth(d), 1e-4)), so the Search field, the dock and the folders came out
+ * as their whole rectangles, half covered, with blurred edges. The texture unit's own derivatives
+ * are right (s8dfdx: the right mipmap level of a 1024 x 1024 texture over 256 x 256 pixels, c58).
+ * So, where the library is the G71's (boot-arg glfwidth=1: leave fwidth() alone), fwidth() in a
+ * fragment shader is the texture unit's: a texture 16384 x 1 whose mipmap level i holds i, on
+ * texture unit LOD_UNIT, read at (v, 0.5) picks level log2(max(|dv/dx|, |dv/dy|) * 16384), and
+ * 2^level / 16384 is that largest step. fwidth() is the sum of the two, between it and twice it;
+ * the edges CoreAnimation draws with it are one or two pixels wide either way.
+ */
+#define LOD_UNIT        15
+#define LOD_SIZE        16384
+static bool fwidth_lowered;                     /* (set in my_initWithAPI) */
+static bool fwidth_native;                      /* boot-arg glfwidth=1 */
+static const char fwidth_lowering[] =
+    "uniform highp sampler2D redwood_lod;\n"
+    "highp float redwood_fwidth(highp float v) {\n"
+    "  return exp2(texture(redwood_lod, vec2(v, .5)).r * 255. / 16.) * (1.25 / 16384.);\n"
+    "}\n"
+    "highp vec2 redwood_fwidth(highp vec2 v) { return vec2(redwood_fwidth(v.x), redwood_fwidth(v.y)); }\n"
+    "highp vec3 redwood_fwidth(highp vec3 v) { return vec3(redwood_fwidth(v.xy), redwood_fwidth(v.z)); }\n"
+    "highp vec4 redwood_fwidth(highp vec4 v) { return vec4(redwood_fwidth(v.xy), redwood_fwidth(v.zw)); }\n"
+    "#define fwidth redwood_fwidth\n";
+
+/* The texture fwidth_lowering reads: level i of it all i * 16 (8 bits: a sixteenth of a level). */
+static void
+lod_texture_make(void)
+{
+	static uint8_t level[LOD_SIZE * 4];
+	GLuint texture = 0;
+
+	glActiveTexture(GL_TEXTURE0 + LOD_UNIT);
+	glGenTextures(1, &texture);
+	glBindTexture(GL_TEXTURE_2D, texture);
+	for (GLint i = 0, size = LOD_SIZE; size >= 1; i++, size /= 2) {
+		memset(level, i * 16, (size_t)size * 4);
+		glTexImage2D(GL_TEXTURE_2D, i, GL_RGBA, size, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, level);
+	}
+	glTexParameteri(GL_TEXTURE_2D, 0x2801, 0x2703);         /* MIN_FILTER LINEAR_MIPMAP_LINEAR */
+	glTexParameteri(GL_TEXTURE_2D, 0x2800, 0x2601);         /* MAG_FILTER LINEAR */
+	glTexParameteri(GL_TEXTURE_2D, 0x2802, 0x2901);         /* WRAP_S REPEAT */
+	glTexParameteri(GL_TEXTURE_2D, 0x2803, 0x812f);         /* WRAP_T CLAMP_TO_EDGE */
+	glActiveTexture(GL_TEXTURE0);
+	say("redwood-gl: fwidth() is the texture unit's (texture %u on unit %d): the G71's lanes do not reach each other\n",
+	    texture, LOD_UNIT);
+}
+
 static GLuint
 my_glCreateShader(void *context, GLenum type)
 {
@@ -3701,8 +3796,8 @@ my_glShaderSource(void *context, GLuint shader, GLsizei count, const GLchar *con
 {
 	struct eagl *e = context;
 	bool fragment = e->fragment[shader % 256], fetch;
-	const GLchar *parts[6] = { "#version 300 es\n", fragment ? fragment_start : vertex_start, "", NULL, "",
-		                   full_precision ? all_highp : "" };
+	const GLchar *parts[7] = { "#version 300 es\n", fragment ? fragment_start : vertex_start, "", NULL, "",
+		                   full_precision ? all_highp : "", "" };
 	size_t size = 1, extensions = 0;
 	char *text, *line, *head;
 
@@ -3731,13 +3826,16 @@ my_glShaderSource(void *context, GLuint shader, GLsizei count, const GLchar *con
 	parts[0] = head;
 	parts[3] = text;
 	if (fragment) {
+		/* galaxios8: (see fwidth_lowering) after the highp defines, ahead of the shader's own text */
+		parts[6] = fwidth_lowered && strstr(text, "fwidth") != NULL ? fwidth_lowering : "";
 		fetch = strstr(text, "gl_LastFragData") != NULL;
 		parts[2] = fetch ? fragment_fetch : fragment_plain;
 		parts[4] = fetch ? fragment_fetch_end : fragment_plain_end;
 	}
 	free((void *)e->sources[shader % 256]);
 	e->sources[shader % 256] = text;
-	glShaderSource(shader, 6, (const GLchar *const[6]){ parts[0], parts[5], parts[1], parts[2], parts[3], parts[4] }, NULL);
+	glShaderSource(shader, 7, (const GLchar *const[7]){ parts[0], parts[5], parts[1], parts[6], parts[2], parts[3], parts[4] },
+	    NULL);
 	EAGL_LEAVE(e, 0x12a0);
 }
 
@@ -3789,6 +3887,16 @@ my_glLinkProgram(void *context, GLuint program)
 	if (!good) {
 		glGetProgramInfoLog(program, sizeof(said), NULL, said);
 		say("redwood-gl: A PROGRAM DOES NOT LINK (program %u): %s\n", program, said);
+	} else if (fwidth_lowered) {
+		/* galaxios8: a program with fwidth_lowering reads its texture on LOD_UNIT */
+		GLint lod = glGetUniformLocation(program, "redwood_lod"), using = 0;
+
+		if (lod >= 0) {
+			glGetIntegerv(0x8b8d, &using);          /* GL_CURRENT_PROGRAM */
+			glUseProgram(program);
+			glUniform1i(lod, LOD_UNIT);
+			glUseProgram((GLuint)using);
+		}
 	}
 	EAGL_LEAVE(e, 0x12c0);
 }
@@ -3844,6 +3952,11 @@ my_initWithAPI(id self, SEL selector, unsigned long api, id properties)
 	e->api = api;
 	e->table[0] = e;
 	eagl_fill_table(e->table);
+	/* galaxios8: fwidth() through the texture unit on the G71 (fwidth_lowering) */
+	if (!fwidth_native && strstr((const char *)glGetString(GL_RENDERER), "G71") != NULL) {
+		fwidth_lowered = true;
+		lod_texture_make();
+	}
 	contexts[place] = e;
 	say("redwood-gl: an OpenGL ES %lu context for CoreAnimation, by %s: %s; %s; shaders %s\n", api, redwood_gl_library(),
 	    (const char *)glGetString(GL_VERSION), (const char *)glGetString(GL_RENDERER),
@@ -4084,6 +4197,15 @@ install(void)
 
 	/* the kernel's boot-args are where a run is told things */
 	if (sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) == 0) {
+		/*
+		 * galaxios8: s8ca=2 loads this library (libs8ca.dylib) but leaves EAGLContext alone: the
+		 * software renderer draws, with the rest of the library there (s8swipe.c), for pictures
+		 * of the same screens to set beside the GPU's.
+		 */
+		if ((argument = strstr(arguments, "s8ca=2")) != NULL && (argument == arguments || argument[-1] == ' ')) {
+			say("redwood-gl: s8ca=2: EAGLContext left as it is (the software renderer draws)\n");
+			return;
+		}
 		if ((argument = strstr(arguments, "gltrace=")) != NULL) {
 			trace_last = trace_first = (unsigned)strtoul(argument + 8, (char **)&argument, 10);
 			if (*argument == '-') {
@@ -4112,6 +4234,7 @@ install(void)
 			trace_corners = (GLsizei)strtol(argument + 16, NULL, 10);
 		}
 		fetch_offered = strstr(arguments, "glfetch=0") == NULL;
+		fwidth_native = strstr(arguments, "glfwidth=1") != NULL;       /* galaxios8: see fwidth_lowering */
 		group_vibrant_on = strstr(arguments, "glgroup=0") == NULL;
 		if ((argument = strstr(arguments, "gltrace_place=")) != NULL) {
 			char *end = (char *)argument + 14;

@@ -1,8 +1,8 @@
 /*
  * s8shot: screenshots of what CoreAnimation drew, without a person at the phone.
  *
- * Run from the drop zone by s8drop (root). At the given seconds after boot (arguments; default
- * 120, 200 and 270) it looks up the IOSurfaces with IDs 1-64, takes those of the screen's size
+ * Run from the drop zone by s8drop (root). At the given seconds after boot (arguments, or else
+ * boot-arg s8shot=T1,T2,... (at most 8); default 120, 200 and 270) it looks up the IOSurfaces with IDs 1-64, takes those of the screen's size
  * (1125x2436 or 1440x2960, BGRA: the window server's framebuffer surfaces) and writes them raw
  * to USERDATA through /dev/rufsroot0 at 21 GiB (after the drop zone at 20 GiB, far from the
  * kernel log ring at the end), where tools/dreamlte/pull-shot.py reads them from TWRP:
@@ -81,10 +81,25 @@ main(int argc, char **argv)
 		return 1;
 	}
 	unsigned slot = 0;
-	static const long defaults[] = { 120, 200, 270 };
-	int shots = argc > 1 ? argc - 1 : 3;
+	long times[8] = { 120, 200, 270 };
+	int shots = 3;
+	char arguments[1024] = "";
+	size_t size = sizeof(arguments) - 1;
+	const char *at;
+	if (argc > 1) {
+		for (shots = 0; shots < argc - 1 && shots < 8; shots++) {
+			times[shots] = strtol(argv[shots + 1], NULL, 10);
+		}
+	} else if (sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) == 0 &&
+	    (at = strstr(arguments, "s8shot=")) != NULL) {
+		char *end;
+		for (shots = 0, at += 7; shots < 8 && *at >= '0' && *at <= '9'; shots++) {
+			times[shots] = strtol(at, &end, 10);
+			at = *end == ',' ? end + 1 : end;
+		}
+	}
 	for (int a = 0; a < shots; a++) {
-		long when = argc > 1 ? strtol(argv[a + 1], NULL, 10) : defaults[a];
+		long when = times[a];
 		while (uptime() < when) {
 			sleep(1);
 		}

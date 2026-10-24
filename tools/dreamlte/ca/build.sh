@@ -21,7 +21,7 @@ CC=(xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O2 -Wall 
 python3 "$here/mkeagl.py" "$here/eagl_slots.txt" "$M/gl.xml" "$M/exported-gl.txt" "$here/eagl.c" > "$obj/eagl_gen.h"
 "${CC[@]}" -dynamiclib -install_name /private/var/tmp/s8drop/ca-libs8gl.dylib -I"$obj" -I"$here" \
 	-framework CoreFoundation -framework IOKit -framework IOSurface -lobjc "$M/ca/libOSMesa.8.dylib" \
-	-o "$obj/libs8gl.dylib" "$here/eagl.c" "$here/gl_osmesa.c"
+	-o "$obj/libs8gl.dylib" "$here/eagl.c" "$here/gl_osmesa.c" "$here/s8swipe.c"
 "${CC[@]}" -dynamiclib -install_name /usr/local/lib/libs8ca.dylib -framework CoreFoundation -framework IOKit \
 	-o "$out/libs8ca.dylib" "$here/s8ca.c"
 otool -L "$obj/libs8gl.dylib" | grep -q /private/var/tmp/s8drop/ca-libOSMesa.8.dylib

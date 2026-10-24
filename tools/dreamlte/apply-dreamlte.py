@@ -2797,3 +2797,97 @@ edit('iokit/Kernel/arm/SweetSurface.cpp', [
      '\t\treturn kIOReturnUnsupported;\n'
      '\tcase kSweetSurfaceCreatePort: {\n', 1),
 ])
+
+# Surfaces around a client's memory (IOSurfaceCreate with "IOSurfaceAddress"). With
+# WrapClientImage refused (above), CoreAnimation's OpenGL ES renderer makes its pictures this way
+# itself: the bytes of an icon, a corner mask, a shadow, a layer's contents as an application drew
+# them, with no pixel format (logged "fmt 0x0 ... keys 8"). SweetSurface ignored the key and gave
+# them new, zeroed memory, so all of those were drawn as nothing: no icons on the home screen,
+# white folder platters, no rounded corners or shadows, no flashlight button on the lock screen
+# (gpu-a hands-on video, c51 shots). Now the surface's pixels are that memory itself, wired while
+# the surface lives (it goes on being drawn into); the creating task sees them at their own
+# address, others through a mapping. As HackiOS's MiniIOSurface.
+edit('iokit/Kernel/arm/SweetSurface.h', [
+    ('\tIOMemoryMap              *kernelMap;    /* lazily created for kernel copies */\n',
+     '\tIOMemoryMap              *kernelMap;    /* lazily created for kernel copies */\n'
+     '\ttask_t                    clientTask;   /* made around this task\'s memory (IOSurfaceAddress), */\n'
+     '\tuint64_t                  clientAddress;        /* ... at this address there; */\n'
+     '\tbool                      prepared;     /* ... which memory holds wired */\n', 1),
+])
+edit('iokit/Kernel/arm/SweetSurface.cpp', [
+    ('\tOSSafeReleaseNULL(kernelMap);\n\tOSSafeReleaseNULL(memory);\n',
+     '\tOSSafeReleaseNULL(kernelMap);\n'
+     '\tif (prepared) {\n'
+     '\t\tmemory->complete();\n'
+     '\t}\n'
+     '\tOSSafeReleaseNULL(memory);\n', 1),
+    # (a client's memory is mapped cached by its owner; only the panel is write-combined)
+    ('\t\tkernelMap = memory->map(kIOMapWriteCombineCache);\n',
+     '\t\tkernelMap = memory->map(mapCache);\n', 1),
+    ('/* Per-client mapping of one surface. */\n',
+     '/*\n'
+     ' * A surface around memory the creating client has already (IOSurfaceAddress): CoreAnimation\'s\n'
+     ' * OpenGL ES renderer makes them around pictures it holds (icons, masks, layer contents). The\n'
+     ' * pixels are that memory, not a copy; it stays wired while the surface lives. One plane only.\n'
+     ' */\n'
+     'static IOReturn\n'
+     'sweet_surface_wrap(SweetSurface *s, OSDictionary *props, uint64_t address)\n'
+     '{\n'
+     '\tuint64_t need = (uint64_t)s->offset + (uint64_t)s->bytesPerRow * sweet_div_up(s->height, s->elementHeight);\n'
+     '\tuint64_t size = sweet_dict_u32(props, "IOSurfaceAllocSize", 0);\n'
+     '\tIOReturn ret = kIOReturnNoMemory;\n'
+     '\n'
+     '\tif (s->planeCount != 0 || props->getObject("IOSurfaceAddressRanges") != NULL) {\n'
+     '\t\treturn kIOReturnUnsupported;\n'
+     '\t}\n'
+     '\tif (size < need) {\n'
+     '\t\tsize = need;\n'
+     '\t}\n'
+     '\tif (address == 0 || size == 0 || size > SWEET_SURFACE_MAX_ALLOC) {\n'
+     '\t\treturn kIOReturnBadArgument;\n'
+     '\t}\n'
+     '\t/* held for writing if it can be, else for reading (a picture that is only shown) */\n'
+     '\tfor (int attempt = 0; attempt < 2 && ret != kIOReturnSuccess; attempt++) {\n'
+     '\t\tOSSafeReleaseNULL(s->memory);\n'
+     '\t\ts->memory = IOMemoryDescriptor::withAddressRange(address, size,\n'
+     '\t\t    attempt == 0 ? kIODirectionInOut : kIODirectionOut, current_task());\n'
+     '\t\tret = s->memory != NULL ? s->memory->prepare() : kIOReturnNoMemory;\n'
+     '\t}\n'
+     '\tif (ret != kIOReturnSuccess) {\n'
+     '\t\tOSSafeReleaseNULL(s->memory);\n'
+     '\t\treturn ret;\n'
+     '\t}\n'
+     '\ts->prepared = true;\n'
+     '\ts->allocSize = (uint32_t)size;\n'
+     '\ts->clientTask = current_task();      /* (the descriptor holds the task) */\n'
+     '\ts->clientAddress = address;\n'
+     '\ts->mapCache = kIOMapDefaultCache;\n'
+     '\treturn sweet_surface_publish(s) ? kIOReturnSuccess : kIOReturnNoResources;\n'
+     '}\n'
+     '\n'
+     '/* Per-client mapping of one surface. */\n', 1),
+    ('\tref->data = s->memory->createMappingInTask(fTask, 0, kIOMapAnywhere | s->mapCache);\n'
+     '\tref->state = s->state->createMappingInTask(fTask, 0, kIOMapAnywhere | kIOMapReadOnly);\n'
+     '\tif (ref->data == NULL || ref->state == NULL) {\n',
+     '\t/* the client whose memory the surface is made around sees it where it is */\n'
+     '\tbool own = s->clientAddress != 0 && fTask == s->clientTask;\n'
+     '\tref->data = own ? NULL : s->memory->createMappingInTask(fTask, 0, kIOMapAnywhere | s->mapCache);\n'
+     '\tref->state = s->state->createMappingInTask(fTask, 0, kIOMapAnywhere | kIOMapReadOnly);\n'
+     '\tif ((ref->data == NULL && !own) || ref->state == NULL) {\n', 1),
+    ('\tput64(out, 0x00, ref->data->getAddress());\n',
+     '\tput64(out, 0x00, ref->data != NULL ? ref->data->getAddress() : s->clientAddress);\n', 1),
+    ('\tret = sweet_surface_layout(s, props);\n'
+     '\tif (ret == kIOReturnSuccess) {\n',
+     '\tret = sweet_surface_layout(s, props);\n'
+     '\tOSNumber *address = OSDynamicCast(OSNumber, props->getObject("IOSurfaceAddress"));\n'
+     '\tif (ret == kIOReturnSuccess && address != NULL) {\n'
+     '\t\tret = sweet_surface_wrap(s, props, address->unsigned64BitValue());\n'
+     '\t} else if (ret == kIOReturnSuccess) {\n', 1),
+    ('\t\tIOLog("SWEET SURF: %s create id %u %ux%u fmt 0x%x bpe %u bpr %u planes %u size %u keys %u -> 0x%x\\n",\n'
+     '\t\t    name, s->id, s->width, s->height, s->pixelFormat, s->bytesPerElement,\n'
+     '\t\t    s->bytesPerRow, s->planeCount, s->allocSize, props->getCount(), ret);\n',
+     '\t\tIOLog("SWEET SURF: %s create id %u %ux%u fmt 0x%x bpe %u bpr %u planes %u size %u keys %u%s -> 0x%x\\n",\n'
+     '\t\t    name, s->id, s->width, s->height, s->pixelFormat, s->bytesPerElement,\n'
+     '\t\t    s->bytesPerRow, s->planeCount, s->allocSize, props->getCount(),\n'
+     '\t\t    address != NULL ? " (client memory)" : "", ret);\n', 1),
+])
