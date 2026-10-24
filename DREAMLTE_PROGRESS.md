@@ -1062,7 +1062,40 @@ QuartzCore 16.7.16 `EAGLServer::renderer()` has the same order (Metal, then
   ca-ready; nothing runs at boot). Hands-on image `shim/dreamlte/out/s8-gpu-b-boot.img` (SHA-256
   5eeacd62...4908; kernel c52, daily-e args + `s8ca=1`, no autoreset).
 - 2026-10-24 14:31: **BOOT = `s8-gpu-b-boot.img`** (read back), rebooted into iOS for the user's
-  second hands-on test. Does not return to TWRP by itself. Result: pending.
+  second hands-on test. Does not return to TWRP by itself.
+- **gpu-b hands-on (user, video IMG_5075):** "much more stable, smoother", App Library, the widget
+  page and Spotlight with the keyboard drawn right; but twice the screen froze (once while opening
+  Settings: the icon's zoom stopped, the screen dimmed) and then looked like a reboot. Phone hot
+  afterwards (TWRP: CPU zones 49 C, battery 39 C; in iOS `S8 DVFS` 63-76 C, cap 82).
+- **gpu-b log** (`logs/sweetlog-gpu-b-hands.txt`, one kernel boot, no panic): the "reboots" were
+  **backboardd crashing twice** (SIGSEGV at 0x8, same place both times; launchd restarted it, so
+  a respring), 0 GPU faults, 121832 jobs. Backtrace (load bases found from the return addresses):
+  `panfrost_bo_import+140` <- `panfrost_resource_from_handle` <- `osmesa_surface_resource` <-
+  `st_get_egl_image` <- `egl_image_target_texture` <- libs8gl `redwood_gl_surface_texture` <-
+  `my_texImageIOSurface`. **Cause:** Panfrost imports a dma-buf twice (panfrost_bo_import's
+  drmPrimeFDToHandle, then pan_kmod_bo_import's) and closes one handle; on Linux both give the
+  same GEM handle, but s8drm made a second kernel import each time (S8Mali selector 8). Every
+  IOSurface texture leaked a kernel handle, its GPU VA and the wired surface (11 MB for a
+  full-screen one) until an import failed and `bo->kmod_bo` (NULL) was dereferenced. backboardd
+  closed with 1881 BOs open the first time.
+- **Fix (Mesa rebuilt, kernel unchanged):** s8drm gives back the handle a surface already has (as
+  Linux) and reports `0x49` on a failed import, `0x4c` each time live imports pass 64, 128, ...;
+  patch-mesa.py makes panfrost_bo_import return NULL on a failed import (its caller handles NULL).
+- Also in that log, older and not GPU: Preferences SIGSEGV pc 0 in `CI::GLContext::init` <-
+  `+[CIContext internalContextWithEAGLContext:]` <- IconServices' `_MI_sharedIconCompositorContext`
+  (the app's own OpenGL ES has no driver; same unslid address in c24, CPU rendering);
+  MobileSlideShow (Photos) abort on an uncaught exception in its run loop (also in c24).
+- **s8swipe:** `tXXYY` taps at XX %, YY % of the screen; `s8swipe=@` reads up to 64 entries from
+  the drop zone file `swipes`.
+- **c62** (kernel c52, drop-ca15 with the fix, `s8swipe=@`: unlock, then 23 times open Settings /
+  Photos / App Store / Safari and swipe home, App Library in and out 5 times; autoreset 900):
+  ran to the end (805 s), **no backboardd crash**, 0 GPU faults (43681 jobs), live imports never
+  reached 64 (no `0x4c` report); 133 IOSurface textures made (93 full screen) where gpu-b's
+  second backboardd crashed after ~71. Shots: Settings, App Store ("connect to Wi-Fi") and Safari
+  (Favorites) drawn right on the Mali. Photos crashed at each launch (the old crash above).
+- 2026-10-24 17:15: **BOOT = `s8-gpu-c-boot.img`** (SHA-256 0d45b8d3...bfc6, read back; kernel
+  c52, gpu-b's args), drop zone = drop-ca16 (ca-libOSMesa with the fix, ca-libs8gl, ca-ready;
+  nothing runs at boot). Rebooted into iOS for the user's third hands-on test. Result: pending.
 
 ### GPU: next steps (plan, not started)
 

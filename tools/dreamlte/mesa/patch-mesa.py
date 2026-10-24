@@ -77,6 +77,24 @@ edit('src/gallium/drivers/panfrost/pan_bo.c', [(
     "   if (os_munmap((void *)(uintptr_t)bo->ptr.cpu, panfrost_bo_size(bo))) {\n"
     "#endif\n", 1)])
 
+# A failed import (no surface, no GPU VA left) is NULL for panfrost_resource_from_handle, not a
+# NULL kmod_bo dereferenced.
+edit('src/gallium/drivers/panfrost/pan_bo.c', [(
+    "   ret = drmPrimeFDToHandle(dev->kmod.dev->fd, fd, &gem_handle);\n"
+    "   assert(!ret);\n",
+    "   ret = drmPrimeFDToHandle(dev->kmod.dev->fd, fd, &gem_handle);\n"
+    "   if (ret) {\n"
+    "      pthread_mutex_unlock(&dev->bo_map_lock);\n"
+    "      return NULL;\n"
+    "   }\n", 1), (
+    "      bo->kmod_bo = pan_kmod_bo_import(dev->kmod.dev, fd, 0);\n",
+    "      bo->kmod_bo = pan_kmod_bo_import(dev->kmod.dev, fd, 0);\n"
+    "      if (!bo->kmod_bo) {\n"
+    "         bo->dev = NULL;\n"
+    "         pthread_mutex_unlock(&dev->bo_map_lock);\n"
+    "         return NULL;\n"
+    "      }\n", 1)])
+
 edit('src/gallium/targets/osmesa/meson.build', [(
     "    dep_ws2_32, dep_thread, dep_clock, dep_unwind, driver_swrast, idep_mesautil,\n",
     "    dep_ws2_32, dep_thread, dep_clock, dep_unwind, driver_swrast, idep_mesautil,\n"

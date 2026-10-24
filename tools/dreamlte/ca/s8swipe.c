@@ -8,7 +8,10 @@
  *   r   left to right across the middle
  *   d   down from the top edge at the left (Notification Center)
  *   c   down from the top edge at the right (Control Center)
- * e.g. s8swipe=100,150l,220d
+ *   tXXYY  a tap at XX % of the width, YY % of the height (t6136: Settings on the home screen)
+ * e.g. s8swipe=100,150l,220d. s8swipe=@ reads the list (up to 64, separated by commas, spaces or
+ * lines) from the drop zone file "swipes" (/private/var/tmp/s8drop/swipes), for longer runs than
+ * the boot-args have room for.
  * libs8gl is loaded only into backboardd (libs8ca.dylib, boot-arg s8ca=1).
  *
  * The touch screen service is HackiOS's userland/src/inject.c (MIT, see LICENSE.hackios), cut down.
@@ -70,10 +73,11 @@ extern void IOHIDEventSetIntegerValue(IOHIDEventRef event, uint32_t field, CFInd
 #define DIGITIZER_FROM_EDGE_TIP         0x800   /* the finger came in over an edge (UIKit's edge gestures want it) */
 #define FIELD_IS_BUILT_IN               0x4
 #define FIELD_DIGITIZER_DISPLAY_INTEGRATED 0xb0019
-#define SWIPES                          8
+#define SWIPES                          64
 
 static long swipe_at[SWIPES];
 static char swipe_kind[SWIPES];
+static double swipe_x[SWIPES], swipe_y[SWIPES];   /* taps */
 static int swipe_count;
 static volatile bool service_opened;
 
@@ -229,6 +233,13 @@ swipe_thread(void *arg)
 		double x0 = 0.5, y0 = 0.995, x1 = 0.5, y1 = 0.495;
 		bool edge = true;
 
+		if (kind == 't') {
+			send_finger(screen, DIGITIZER_RANGE | DIGITIZER_TOUCH, true, swipe_x[k], swipe_y[k], false);
+			usleep(80000);
+			send_finger(screen, DIGITIZER_RANGE | DIGITIZER_TOUCH, false, swipe_x[k], swipe_y[k], false);
+			say("s8ca: tapped %.2f,%.2f at %ld s\n", swipe_x[k], swipe_y[k], seconds_since_boot());
+			continue;
+		}
 		if (kind == 'l' || kind == 'r') {
 			x0 = kind == 'l' ? 0.85 : 0.15;
 			x1 = kind == 'l' ? 0.15 : 0.85;
@@ -257,15 +268,41 @@ swipe_later(const char *arguments)
 	const char *at = strstr(arguments, "s8swipe=");
 	pthread_t thread;
 
+	static char list[2048];
+
 	if (at == NULL || (at != arguments && at[-1] != ' ')) {
 		return;
 	}
-	for (at += 8; swipe_count < SWIPES && *at >= '0' && *at <= '9';) {
+	at += 8;
+	if (*at == '@') {
+		FILE *f = fopen("/private/var/tmp/s8drop/swipes", "r");
+		size_t n = f != NULL ? fread(list, 1, sizeof(list) - 1, f) : 0;
+
+		if (f != NULL) {
+			fclose(f);
+		}
+		list[n] = 0;
+		at = list;
+		say("s8ca: swipes from the drop zone: %zu bytes\n", n);
+	}
+	for (;;) {
+		while (*at == ',' || *at == ' ' || *at == '\n' || *at == '\r') {
+			at++;
+		}
+		if (swipe_count >= SWIPES || *at < '0' || *at > '9') {
+			break;
+		}
 		char *end;
 
 		swipe_at[swipe_count] = strtol(at, &end, 10);
-		swipe_kind[swipe_count++] = *end >= 'a' && *end <= 'z' ? *end++ : 0;
-		at = *end == ',' ? end + 1 : end;
+		swipe_kind[swipe_count] = *end >= 'a' && *end <= 'z' ? *end++ : 0;
+		if (swipe_kind[swipe_count] == 't') {
+			long xy = strtol(end, &end, 10);
+			swipe_x[swipe_count] = (xy / 100) / 100.0;
+			swipe_y[swipe_count] = (xy % 100) / 100.0;
+		}
+		swipe_count++;
+		at = end;
 	}
 	if (swipe_count > 0 && pthread_create(&thread, NULL, swipe_thread, NULL) == 0) {
 		pthread_detach(thread);

@@ -7,7 +7,10 @@
  *   6 Madvise [handle, madv] -> [retained]    7 Report [code, a, b]
  *   8 ImportSurface [IOSurface ID] -> [handle, gpu va, size]   9 SyncBO [handle]
  * IOSurfaces come in where Linux passes dma-buf fds (drmPrimeFDToHandle: the "fd" is the
- * surface ID). The CPU maps surfaces cached and the GPU is not coherent, so every submit that
+ * surface ID). As on Linux, a surface already imported gives back the handle it has: Panfrost
+ * imports each surface twice (panfrost_bo_import, then pan_kmod_bo_import) and closes the
+ * handle once, so a second kernel import per surface leaked a handle, the GPU VA and the
+ * surface itself until an import failed (backboardd crashed in panfrost_bo_import). The CPU maps surfaces cached and the GPU is not coherent, so every submit that
  * names an imported BO cleans and invalidates its cache lines before and after the job.
  * A buffer's memory is the client memory of the type that is its handle. The device "file" is
  * /dev/null: one GPU, one connection per process.
@@ -60,9 +63,11 @@ static uint64_t submits, failed;
 #define MAX_MAPS 8192
 static struct { uintptr_t addr; uint32_t handle; } maps[MAX_MAPS];
 
-/* Imported BOs (kernel handles are 1..4096): their size, 0 if not imported. */
+/* Imported BOs (kernel handles are 1..4096): their size, 0 if not imported, and surface ID. */
 #define MAX_HANDLES 4096
 static uint64_t imported[MAX_HANDLES + 1];
+static uint32_t imported_id[MAX_HANDLES + 1];
+static uint32_t live_imports, import_mark = 64;
 
 static void
 sync_imported(const struct drm_panfrost_submit *s)
@@ -305,9 +310,13 @@ int
 drmCloseBufferHandle(int fd, uint32_t handle)
 {
 	(void)fd;
-	if (handle <= MAX_HANDLES) {
+	pthread_mutex_lock(&lock);
+	if (handle <= MAX_HANDLES && imported[handle] != 0) {
 		imported[handle] = 0;
+		imported_id[handle] = 0;
+		live_imports--;
 	}
+	pthread_mutex_unlock(&lock);
 	uint64_t in = handle;
 	return call(SEL_FREE, &in, 1, NULL, 0);
 }
@@ -325,11 +334,28 @@ drmPrimeFDToHandle(int fd, int prime_fd, uint32_t *handle)
 {
 	(void)fd;
 	uint64_t in = (uint32_t)prime_fd, out[3];
-	if (call(SEL_IMPORT, &in, 1, out, 3) != 0 || out[0] > MAX_HANDLES) {
-		return -errno;
+	pthread_mutex_lock(&lock);
+	for (uint32_t h = 1; h <= MAX_HANDLES; h++) {
+		if (imported[h] != 0 && imported_id[h] == (uint32_t)prime_fd) {
+			*handle = h;
+			pthread_mutex_unlock(&lock);
+			return 0;
+		}
+	}
+	if (call(SEL_IMPORT, &in, 1, out, 3) != 0 || out[0] == 0 || out[0] > MAX_HANDLES) {
+		int e = errno != 0 ? errno : EINVAL;
+		pthread_mutex_unlock(&lock);
+		s8_drm_report(0x49, in, live_imports);     /* 'I': import failed: surface, live imports */
+		return -e;
 	}
 	*handle = (uint32_t)out[0];
 	imported[out[0]] = out[2];
+	imported_id[out[0]] = (uint32_t)prime_fd;
+	if (++live_imports >= import_mark) {           /* a leak shows as a rising mark */
+		import_mark *= 2;
+		s8_drm_report(0x4c, live_imports, out[2]);
+	}
+	pthread_mutex_unlock(&lock);
 	return 0;
 }
 
