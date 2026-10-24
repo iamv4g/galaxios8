@@ -126,6 +126,13 @@ def build(canvas=(FB_W, FB_H), dram_size=DRAM_SIZE):
         ('height', mkadt.u32(FB_H)),
         ('stride', mkadt.u32(FB_W * 4)),
     ]))
+    # The iPhone X tree says "artwork-display-gamut" P3, and with it iOS takes the screen for a
+    # wide-colour one: once CoreAnimation draws with OpenGL ES its framebuffer surfaces are 'b3a8'
+    # (30-bit colour + 8-bit alpha plane; c48), which neither the panel scan-out (XRGB8888) nor
+    # the GL bridge handles. The framebuffer is sRGB, so the tree says so (as HackiOS's loader).
+    product = [n for n in root.children if n.prop('name') == mkadt.cstr('product')]
+    if product:
+        set_prop(product[0], 'artwork-display-gamut', b'sRGB\0')
     # bsd/dev/sweet_ufs.c (A5XELTE config, EXYNOS_UFS): UFSHCI standard
     # registers, then the Exynos vendor HCI block (HCI_UTRL_NEXUS_TYPE etc.).
     root.children.append(mkadt.node('dreamlte-ufs', [

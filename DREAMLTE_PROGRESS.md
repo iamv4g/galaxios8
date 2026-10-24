@@ -959,6 +959,43 @@ passed again.
   itself (CoreAnimation/backboardd, apps) using the GPU; the UI still
   renders on the CPU.
 
+### CoreAnimation on the Mali: the bridge (c46-c49, 2026-10-24)
+
+`tools/dreamlte/ca/` (README there): HackiOS's EAGLContext bridge `eagl.c` (MIT, commit
+a79ff07) built as `libs8gl.dylib` on our Mesa (now with `OSMESA_ES_PROFILE`), loaded into
+backboardd by our `libs8ca.dylib`. The OpenGLES macro-context table (`eagl_slots.txt`, 414
+offsets) was checked against 16.7.16's OpenGLES in the dyld cache: identical to 16.5.
+QuartzCore 16.7.16 `EAGLServer::renderer()` has the same order (Metal, then
+`[EAGLContext initWithAPI:properties:]` + `GLESContext`, then software).
+
+- Kernel (0124): policy `AMFI` answers dyld's policy request 0x5a with all allowed
+  (`s8dyld=0` off); S8Mali selector 10 logs text (`S8 LOG <proc>:`); with `s8ca=1` the kernel
+  adds `DYLD_INSERT_LIBRARIES=/usr/local/lib/libs8ca.dylib` when it execs backboardd.
+- Root edited twice (`edit-live-root.sh LIVE.img ca`, fsck clean before/after; 7 then 3
+  chunks written and verified): `/usr/local/lib/libs8ca.dylib`, plus an
+  `EnvironmentVariables` entry in backboardd's job that launchd ignores (harmless).
+- c46 (kernel with the AMFI policy, `s8ca=1`): "dyld policy ... registered", iOS booted
+  normally (462 execs), but libs8ca never ran: **launchd does not pass DYLD_* from job
+  descriptions** -> the kernel adds it at exec (as HackiOS's kern.exec_inject).
+- c47: libs8ca ran in backboardd and logged through selector 10; `/dev/rufsroot0`:
+  "Permission denied" (backboardd may not read the raw disk) -> libs8ca now waits for s8drop
+  (root) to unpack this boot's drop (`ca-ready` last, mtime >= kern.boottime), 8.7 s after
+  backboardd started in c48.
+- **c48: CoreAnimation took the OpenGL ES road on the Mali:** "an OpenGL ES 3 context for
+  CoreAnimation ... OpenGL ES 3.1 Mesa 25.0.7; Mali-G71 (Panfrost)", 8/8 EAGLContext methods
+  replaced, shaders compiled. Then: the framebuffer surfaces were `'b3a8'` (30-bit colour +
+  8-bit alpha plane: the ADT's iPhone X `artwork-display-gamut` P3), the bridge refused them,
+  glDrawElements error 0x506 and backboardd crashed (restarted by launchd in a loop; the
+  software renderer did not come back, so the screen likely showed no UI; not observed).
+  -> `mkadt_dreamlte.py` writes `artwork-display-gamut` = sRGB (the panel is XRGB8888).
+- c49 (sRGB): framebuffer surfaces BGRA 1125x2436, attached ("a texture, copied into its
+  memory by the GPU"), **2 GPU jobs per backboardd start, 0 faults**, then SIGSEGV reading 0x30
+  in `IOSurfaceClientGetBulkAttachments` <- `CA::Render::iosurface_get_edr_factor` <-
+  `IOSurface::wrap_buffer` <- `GLESContext::retain_image` (frames symbolized with `ipsw dyld
+  a2s`). Cause: IOSurface selector 6 is `IOSurfaceClientWrapClientImage`; SweetSurface's default
+  case answered success with an all-zero lock result. Now refused (CoreAnimation then uploads the
+  image as a texture). Kernel building (c50).
+
 ### GPU: next steps (plan, not started)
 
 1. CoreAnimation on the Mali: HackiOS's route (research/hackios

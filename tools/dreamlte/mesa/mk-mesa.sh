@@ -76,10 +76,10 @@ mkdir -p out/drop
 cp out/libOSMesa.8.dylib out/drop/libOSMesa.8.dylib
 install_name_tool -id /private/var/tmp/s8drop/libOSMesa.8.dylib out/drop/libOSMesa.8.dylib  # dyld refuses @ paths here (c36)
 codesign -f -s - out/drop/libOSMesa.8.dylib
-# ... and for the CoreAnimation bridge in backboardd (tools/dreamlte/ca), which unpacks it there
+# ... and for the CoreAnimation bridge in backboardd (tools/dreamlte/ca): s8drop unpacks it as ca-libOSMesa.8.dylib
 mkdir -p out/ca
 cp out/libOSMesa.8.dylib out/ca/libOSMesa.8.dylib
-install_name_tool -id /private/var/tmp/s8ca/libOSMesa.8.dylib out/ca/libOSMesa.8.dylib
+install_name_tool -id /private/var/tmp/s8drop/ca-libOSMesa.8.dylib out/ca/libOSMesa.8.dylib
 codesign -f -s - out/ca/libOSMesa.8.dylib
 # what tools/dreamlte/ca/mkeagl.py needs: the gl* functions the library exports, their prototypes
 nm -gU out/libOSMesa.8.dylib | awk '$3 ~ /^_gl/ { print substr($3, 2) }' > out/exported-gl.txt

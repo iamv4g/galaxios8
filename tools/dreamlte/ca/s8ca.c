@@ -10,12 +10,11 @@
  * With s8ca=1, in backboardd, before main():
  *   1. stderr becomes a pipe whose lines go to the kernel log through the S8Mali Log selector
  *      ("S8 LOG backboardd: ..."): what the bridge and Mesa say, and the lines below.
- *   2. The files named "ca-*" in the drop zone (raw USERDATA at 20 GiB, tools/dreamlte/s8drop.c
- *      for the format; tools/dreamlte/mkdrop.py) are unpacked to /private/var/tmp/s8ca/ without
- *      the prefix: libs8gl.dylib (the EAGLContext bridge, eagl.c + gl_osmesa.c) and the
- *      libOSMesa.8.dylib it links (install name /private/var/tmp/s8ca/libOSMesa.8.dylib).
- *      s8drop runs from launchd at the same time, so this does not wait for it.
- *   3. libs8gl.dylib is loaded; its constructor replaces EAGLContext's methods, and the
+ *   2. It waits (at most 90 s) until s8drop (tools/dreamlte/s8drop.c, root) has unpacked this
+ *      boot's drop zone into /private/var/tmp/s8drop/: ca-libOSMesa.8.dylib (Mesa Panfrost),
+ *      ca-libs8gl.dylib (the EAGLContext bridge, eagl.c + gl_osmesa.c, linking the former by that
+ *      path) and last ca-ready (16 bytes) whose time says it is from this boot.
+ *   3. ca-libs8gl.dylib is loaded; its constructor replaces EAGLContext's methods, and the
  *      renderer CoreAnimation then gets (no Metal device -> [EAGLContext initWithAPI:3] ->
  *      CA::OGL::GLESContext) draws through Mesa Panfrost on the S8Mali driver.
  *   4. A crash in backboardd is written down (signal, pc, lr and the frame chain as unslid
@@ -37,6 +36,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
+#include <sys/time.h>
 #include <sys/ucontext.h>
 #include <unistd.h>
 
@@ -52,17 +52,9 @@ extern kern_return_t IOConnectCallStructMethod(io_connect_t connection, uint32_t
 extern const void *_dyld_get_shared_cache_range(size_t *length);
 
 #define CACHE_BASE      0x180000000UL           /* the iPhone10,3 16.7.16 cache as built */
-#define S8DROP_OFFSET   (20ULL << 30)
-#define S8DROP_MAX      (256ULL << 20)
-#define DIR             "/private/var/tmp/s8ca"
-#define PIECE           (1ULL << 20)
+#define DIR             "/private/var/tmp/s8drop"
+#define WAIT_SECONDS    90
 #define LOG_SELECTOR    10
-
-struct entry {
-	char name[48];
-	uint32_t flags, reserved;
-	uint64_t offset, size;
-};
 
 static io_connect_t conn;
 static uintptr_t slide;
@@ -143,88 +135,30 @@ log_to_kernel(void)
 
 /* ---- the drop zone ------------------------------------------------------------------------------ */
 
-/* [off, off + len) of the zone; the raw device wants 4 KiB aligned transfers */
+/*
+ * s8drop (root, from launchd at the same time as this) unpacks every file of the drop zone into
+ * DIR, in the zone's order; the drop puts "ca-ready" last. backboardd itself may not read the raw
+ * disk (c47: /dev/rufsroot0 "Permission denied"). A ca-ready written before this boot is old.
+ */
 static int
-zread(int fd, uint64_t off, void *dst, uint64_t len)
+wait_for_drop(void)
 {
-	uint64_t start = off & ~4095ULL, end = (off + len + 4095) & ~4095ULL;
-	char *tmp = malloc(end - start);
+	struct timeval boot;
+	size_t size = sizeof(boot);
+	struct stat st;
 
-	if (tmp == NULL) {
-		return -1;
+	if (sysctlbyname("kern.boottime", &boot, &size, NULL, 0) != 0) {
+		return 0;
 	}
-	for (uint64_t done = 0; done < end - start;) {
-		ssize_t n = pread(fd, tmp + done, end - start - done, (off_t)(S8DROP_OFFSET + start + done));
-		if (n <= 0) {
-			free(tmp);
-			return -1;
+	for (int i = 0; i < WAIT_SECONDS * 10; i++) {
+		if (stat(DIR "/ca-ready", &st) == 0 && st.st_mtimespec.tv_sec >= boot.tv_sec && st.st_size == 16) {
+			say("s8ca: drop ready after %d.%d s\n", i / 10, i % 10);
+			return 1;
 		}
-		done += (uint64_t)n;
+		usleep(100000);
 	}
-	memcpy(dst, tmp + (off - start), len);
-	free(tmp);
+	say("s8ca: no ca-ready of this boot in " DIR " after %d s\n", WAIT_SECONDS);
 	return 0;
-}
-
-/* Unpacks the "ca-*" files of the zone into DIR; returns how many. */
-static int
-unpack(void)
-{
-	static char hdr[4096];
-	struct entry *e = (struct entry *)(hdr + 16);
-	uint32_t count;
-	int fd = open("/dev/rufsroot0", O_RDONLY), unpacked = 0;
-
-	if (fd < 0 || zread(fd, 0, hdr, sizeof(hdr)) != 0 || memcmp(hdr, "S8DROP01", 8) != 0) {
-		say("s8ca: no drop zone (%s)\n", fd < 0 ? strerror(errno) : "no header");
-		if (fd >= 0) {
-			close(fd);
-		}
-		return 0;
-	}
-	memcpy(&count, hdr + 8, 4);
-	if (count > (sizeof(hdr) - 16) / sizeof(*e)) {
-		close(fd);
-		return 0;
-	}
-	mkdir(DIR, 0755);
-	for (uint32_t i = 0; i < count; i++) {
-		char path[128], tmp[136];
-		char *data;
-		int out;
-
-		e[i].name[47] = 0;
-		if (strncmp(e[i].name, "ca-", 3) != 0 || strchr(e[i].name, '/') != NULL ||
-		    e[i].offset + e[i].size > S8DROP_MAX) {
-			continue;
-		}
-		snprintf(path, sizeof(path), DIR "/%s", e[i].name + 3);
-		snprintf(tmp, sizeof(tmp), "%s.new", path);
-		data = malloc(PIECE);
-		out = data != NULL ? open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0755) : -1;
-		uint64_t done = 0;
-		while (out >= 0 && done < e[i].size) {
-			uint64_t n = e[i].size - done < PIECE ? e[i].size - done : PIECE;
-			if (zread(fd, e[i].offset + done, data, n) != 0 || write(out, data, n) != (ssize_t)n) {
-				break;
-			}
-			done += n;
-		}
-		if (out >= 0) {
-			close(out);
-		}
-		free(data);
-		/* a new name each time: dyld must not find a half-written file */
-		if (done == e[i].size && rename(tmp, path) == 0) {
-			say("s8ca: unpacked %s (%llu bytes)\n", path, e[i].size);
-			unpacked++;
-		} else {
-			say("s8ca: %s: not unpacked (%s)\n", e[i].name, strerror(errno));
-			unlink(tmp);
-		}
-	}
-	close(fd);
-	return unpacked;
 }
 
 /* ---- crashes ------------------------------------------------------------------------------------ */
@@ -307,8 +241,10 @@ s8ca_init(void)
 	log_to_kernel();
 	watch_for_faults();
 	say("s8ca: in backboardd (pid %d), shared cache slide %#lx\n", getpid(), slide);
-	unpack();
-	library = dlopen(DIR "/libs8gl.dylib", RTLD_NOW);
+	if (!wait_for_drop()) {
+		return;
+	}
+	library = dlopen(DIR "/ca-libs8gl.dylib", RTLD_NOW);
 	if (library == NULL) {
 		say("s8ca: %s\n", dlerror());
 		return;

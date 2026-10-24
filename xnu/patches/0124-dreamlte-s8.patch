@@ -778,7 +778,7 @@ index 6b926fe..73dbb5b 100644
  	thread_t thread;
  
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
-index deccec2..4c34bce 100644
+index deccec2..2bc2f35 100644
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
 @@ -368,6 +368,34 @@ struct exec_port_actions {
@@ -816,7 +816,57 @@ index deccec2..4c34bce 100644
  static int exec_copyout_strings(struct image_params *imgp, user_addr_t *stackp);
  static int load_return_to_errno(load_return_t lrtn);
  static int execargs_alloc(struct image_params *imgp);
-@@ -7413,6 +7441,16 @@ process_signature(proc_t p, struct image_params *imgp)
+@@ -5568,6 +5596,25 @@ bad:
+  * Note:	The argument and environment vectors are user space pointers
+  *		to arrays of user space pointers.
+  */
++#if defined(ARM64_BOARD_CONFIG_A5XELTE)
++static const char *
++s8_exec_inject(struct image_params *imgp)
++{
++	static int state;       /* 0 unparsed, 1 off, 2 on */
++
++	if (state == 0) {
++		int on = 0;
++		state = (PE_parse_boot_argn("s8ca", &on, sizeof(on)) && on) ? 2 : 1;
++	}
++	if (state != 2 || imgp->ip_ndp == NULL ||
++	    imgp->ip_ndp->ni_cnd.cn_namelen != 10 ||
++	    strncmp(imgp->ip_ndp->ni_cnd.cn_nameptr, "backboardd", 10) != 0) {
++		return NULL;
++	}
++	return "DYLD_INSERT_LIBRARIES=/usr/local/lib/libs8ca.dylib";
++}
++#endif
++
+ __attribute__((noinline))
+ static int
+ exec_extract_strings(struct image_params *imgp)
+@@ -5741,6 +5788,23 @@ exec_extract_strings(struct image_params *imgp)
+ 		imgp->ip_envc++;
+ 	}
+ 
++#if defined(ARM64_BOARD_CONFIG_A5XELTE)
++	const char *s8_inject = s8_exec_inject(imgp);
++	if (s8_inject != NULL) {
++		error = exec_add_user_string(imgp, CAST_USER_ADDR_T(s8_inject), UIO_SYSSPACE, TRUE);
++		if (error) {
++			goto bad;
++		}
++		if (imgp->ip_argspace < new_ptr_size) {
++			error = E2BIG;
++			goto bad;
++		}
++		imgp->ip_argspace -= new_ptr_size;
++		imgp->ip_envc++;
++		printf("exec backboardd: %s (s8ca)\n", s8_inject);
++	}
++#endif
++
+ 	/* Save space for envv[] NULL terminator */
+ 	if (imgp->ip_argspace < new_ptr_size) {
+ 		error = E2BIG;
+@@ -7413,6 +7477,16 @@ process_signature(proc_t p, struct image_params *imgp)
  			}
  #if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
  			/* A short line keeps the persistent console ring useful. */
@@ -3550,6 +3600,20 @@ index 356ff51..9161b9f 100644
  }
  
  bool
+diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
+index 7f90c56..1af3322 100644
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -760,6 +760,9 @@ IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
+ 		sweet_surf_log_once("sel", selector);
+ 		return ret;
+ 	}
++	case 6:                 /* IOSurfaceClientWrapClientImage: not supported */
++		sweet_surf_log_once("sel", selector);
++		return kIOReturnUnsupported;
+ 	case kSweetSurfaceCreatePort: {
+ 		SweetSurface *s = sweet_surface_copy((uint32_t)arg0);
+ 		if (s == NULL || args->scalarOutputCount < 1) {
 diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
 index 9987f5a..fb427be 100644
 --- a/iokit/KernelConfigTables.cpp

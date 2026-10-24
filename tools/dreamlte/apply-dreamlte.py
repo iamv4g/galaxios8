@@ -2726,3 +2726,74 @@ edit('bsd/kern/sweet_amfi.c', [
      '\t}\n'
      '#endif\n', 1),
 ])
+
+# launchd does not pass DYLD_* variables from a job description (c46: backboardd's
+# EnvironmentVariables had DYLD_INSERT_LIBRARIES and libs8ca.dylib was never loaded), so the
+# kernel adds the variable at exec, as HackiOS's kern.exec_inject does: with boot-arg s8ca=1,
+# a program whose file name is "backboardd" gets
+# DYLD_INSERT_LIBRARIES=/usr/local/lib/libs8ca.dylib (tools/dreamlte/ca/s8ca.c).
+edit('bsd/kern/kern_exec.c', [
+    ('__attribute__((noinline))\nstatic int\nexec_extract_strings(struct image_params *imgp)\n{\n',
+     '#if defined(ARM64_BOARD_CONFIG_A5XELTE)\n'
+     'static const char *\n'
+     's8_exec_inject(struct image_params *imgp)\n'
+     '{\n'
+     '\tstatic int state;       /* 0 unparsed, 1 off, 2 on */\n'
+     '\n'
+     '\tif (state == 0) {\n'
+     '\t\tint on = 0;\n'
+     '\t\tstate = (PE_parse_boot_argn("s8ca", &on, sizeof(on)) && on) ? 2 : 1;\n'
+     '\t}\n'
+     '\tif (state != 2 || imgp->ip_ndp == NULL ||\n'
+     '\t    imgp->ip_ndp->ni_cnd.cn_namelen != 10 ||\n'
+     '\t    strncmp(imgp->ip_ndp->ni_cnd.cn_nameptr, "backboardd", 10) != 0) {\n'
+     '\t\treturn NULL;\n'
+     '\t}\n'
+     '\treturn "DYLD_INSERT_LIBRARIES=/usr/local/lib/libs8ca.dylib";\n'
+     '}\n'
+     '#endif\n'
+     '\n'
+     '__attribute__((noinline))\nstatic int\nexec_extract_strings(struct image_params *imgp)\n{\n', 1),
+    ('\t\timgp->ip_argspace -= new_ptr_size; /* to hold envv[] entry */\n'
+     '\t\timgp->ip_envc++;\n'
+     '\t}\n'
+     '\n'
+     '\t/* Save space for envv[] NULL terminator */\n',
+     '\t\timgp->ip_argspace -= new_ptr_size; /* to hold envv[] entry */\n'
+     '\t\timgp->ip_envc++;\n'
+     '\t}\n'
+     '\n'
+     '#if defined(ARM64_BOARD_CONFIG_A5XELTE)\n'
+     '\tconst char *s8_inject = s8_exec_inject(imgp);\n'
+     '\tif (s8_inject != NULL) {\n'
+     '\t\terror = exec_add_user_string(imgp, CAST_USER_ADDR_T(s8_inject), UIO_SYSSPACE, TRUE);\n'
+     '\t\tif (error) {\n'
+     '\t\t\tgoto bad;\n'
+     '\t\t}\n'
+     '\t\tif (imgp->ip_argspace < new_ptr_size) {\n'
+     '\t\t\terror = E2BIG;\n'
+     '\t\t\tgoto bad;\n'
+     '\t\t}\n'
+     '\t\timgp->ip_argspace -= new_ptr_size;\n'
+     '\t\timgp->ip_envc++;\n'
+     '\t\tprintf("exec backboardd: %s (s8ca)\\n", s8_inject);\n'
+     '\t}\n'
+     '#endif\n'
+     '\n'
+     '\t/* Save space for envv[] NULL terminator */\n', 1),
+])
+
+# IOSurface selector 6 is IOSurfaceClientWrapClientImage (a surface around a client's image
+# memory, struct in 0x20 bytes, lock result out). CoreAnimation's OpenGL ES renderer asks for it
+# for layer contents (GLESContext::retain_image -> Image::retain_iosurface); the default case
+# answered success with an all-zero lock result, the library built a client with NULL state
+# pointers, and backboardd died in IOSurfaceClientGetBulkAttachments (c48/c49, read of 0x30).
+# Refused, retain_iosurface returns NULL and CoreAnimation uploads the image as a texture.
+# The software renderer never asks (c47).
+edit('iokit/Kernel/arm/SweetSurface.cpp', [
+    ('\tcase kSweetSurfaceCreatePort: {\n',
+     '\tcase 6:                 /* IOSurfaceClientWrapClientImage: not supported */\n'
+     '\t\tsweet_surf_log_once("sel", selector);\n'
+     '\t\treturn kIOReturnUnsupported;\n'
+     '\tcase kSweetSurfaceCreatePort: {\n', 1),
+])

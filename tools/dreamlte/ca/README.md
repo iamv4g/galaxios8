@@ -8,7 +8,7 @@ our own behind `EAGLContext` inside backboardd: Mesa 25.0.7 Panfrost on the S8Ma
 
 | File | What |
 |---|---|
-| `s8ca.c` | `libs8ca.dylib`, ours: inserted into backboardd; with boot-arg `s8ca=1` sends stderr to the kernel log (S8Mali selector 10, lines `S8 LOG backboardd:`), unpacks the drop-zone files `ca-*` to `/private/var/tmp/s8ca/`, loads `libs8gl.dylib`, logs crashes |
+| `s8ca.c` | `libs8ca.dylib`, ours: inserted into backboardd; with boot-arg `s8ca=1` sends stderr to the kernel log (S8Mali selector 10, lines `S8 LOG backboardd:`), waits until s8drop has unpacked this boot's drop (`/private/var/tmp/s8drop/ca-ready`), loads `ca-libs8gl.dylib`, logs crashes |
 | `eagl.c`, `gl_osmesa.c`, `redwood_gl.h` | `libs8gl.dylib`: HackiOS's EAGLContext bridge (MIT, `LICENSE.hackios`, commit a79ff07); our changes are marked `galaxios8` |
 | `eagl_slots.txt`, `mkeagl.py` | HackiOS's table of OpenGLES's macro-context dispatch offsets and its generator. All 414 offsets were checked against the 16.7.16 (20H392) OpenGLES in the dyld cache: identical to 16.5 |
 | `build.sh` | builds both (needs `tools/dreamlte/mesa/mk-mesa.sh` output) |
@@ -17,15 +17,18 @@ How it is put together:
 
 1. Kernel (0124): a MAC policy named `AMFI` answers dyld's "check dyld policy" request (0x5a)
    with everything allowed, so dyld honours `DYLD_INSERT_LIBRARIES` and a library that fails to
-   load does not kill the process (`s8dyld=0` turns it off). S8Mali selector 10 logs text.
+   load does not kill the process (`s8dyld=0` turns it off). launchd does not pass `DYLD_*`
+   variables from job descriptions (c46), so with `s8ca=1` the kernel adds
+   `DYLD_INSERT_LIBRARIES=/usr/local/lib/libs8ca.dylib` when it execs `backboardd` (as HackiOS's
+   `kern.exec_inject`). S8Mali selector 10 logs text.
 2. Mesa (`patch-mesa.py`): `OSMESA_ES_PROFILE` (OpenGL ES 2/3 contexts), as HackiOS's
    `osmesa-es-profile.patch`; IOSurfaces become textures/render targets through
    `glEGLImageTargetTexture2DOES(target, surfaceID)` (c43).
-3. Root, once: `edit-live-root.sh LIVE.img ca` installs `/usr/local/lib/libs8ca.dylib` and adds
-   `DYLD_INSERT_LIBRARIES` to backboardd's job. Old kernels ignore the variable; kernels without
-   `s8ca=1` load the library but it returns at once.
-4. Each try: `build.sh`, `mkdrop.py OUT.img shim/dreamlte/out/drop/ca-libs8gl.dylib
-   shim/dreamlte/out/drop/ca-libOSMesa.8.dylib`, `drop.sh OUT.img`, boot an image with `s8ca=1`.
+3. Root, once: `edit-live-root.sh LIVE.img ca` installs `/usr/local/lib/libs8ca.dylib` (and
+   adds the variable to backboardd's job, which launchd ignores; harmless).
+4. Each try: `build.sh`; `mkdrop.py OUT.img D/ca-libOSMesa.8.dylib D/ca-libs8gl.dylib D/ca-ready`
+   (D = shim/dreamlte/out/drop, in this order: ca-ready last); `drop.sh OUT.img`; boot an image
+   with `s8ca=1`. backboardd itself may not read the raw disk (c47), so s8drop (root) unpacks.
 
 eagl.c reads its own boot-args (`glframes=1`, `gltrace=`, `glcensus=1`, `glwait=`, ...; see the
 top of the file).
